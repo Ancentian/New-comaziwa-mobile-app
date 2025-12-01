@@ -10,6 +10,9 @@ import 'package:fluttertoast/fluttertoast.dart';
 import 'dart:async';
 // import 'bluetooth_device_list_page.dart';
 
+import '../models/record.dart';
+import '../services/local_storage_service.dart';
+
 class DashboardPage extends StatefulWidget {
   final String name;
 
