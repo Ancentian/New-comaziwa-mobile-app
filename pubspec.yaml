@@ -34,9 +34,10 @@ dependencies:
   # Networking and storage
   http: ^1.2.0
   shared_preferences: ^2.2.3
-  hive_flutter: ^1.1.0
   sqflite: ^2.3.0
   path_provider: ^2.1.2
+  hive: ^2.2.3
+  hive_flutter: ^1.1.0
 
   # System & logging
   connectivity_plus: ^6.1.0
@@ -54,6 +55,9 @@ dependencies:
 dev_dependencies:
   flutter_test:
     sdk: flutter
+  hive_generator: ^2.0.0
+  build_runner: ^2.4.0
+  analyzer: ^6.1.0
 
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is

@@ -6,10 +6,40 @@ import 'screens/milk_list_page.dart';
 // import 'screens/bluetooth_device_list_page.dart';
 import 'screens/farmers_list_page.dart';
 import 'screens/profile_page.dart';
+import 'package:hive_flutter/hive_flutter.dart';
+import 'models/farmer.dart';
+import 'models/milk_collection.dart';
+import 'models/record.dart';
+import 'services/sync_service.dart';
 
-void main() {
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Hive.initFlutter();
+
+  Hive.registerAdapter(FarmerAdapter());
+  Hive.registerAdapter(MilkCollectionAdapter());
+
+  await Hive.openBox<Farmer>('farmers');
+  await Hive.openBox<MilkCollection>('milk_collections');
+
   runApp(const MyApp());
 }
+
+
+// void main() async {
+//   WidgetsFlutterBinding.ensureInitialized();
+//   await Hive.initFlutter();
+
+//   Hive.registerAdapter(MilkCollectionAdapter());
+//   await Hive.openBox<MilkCollection>('milk_collections');
+
+//   runApp(const MyApp());
+// }
+
+
+
+
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
