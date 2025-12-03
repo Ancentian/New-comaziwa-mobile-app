@@ -1,45 +1,39 @@
 import 'package:flutter/material.dart';
+import 'package:hive_flutter/hive_flutter.dart';
 import 'screens/login_page.dart';
 import 'screens/dashboard_page.dart';
 import 'screens/milk_collection_page.dart';
 import 'screens/milk_list_page.dart';
-// import 'screens/bluetooth_device_list_page.dart';
 import 'screens/farmers_list_page.dart';
 import 'screens/profile_page.dart';
-import 'package:hive_flutter/hive_flutter.dart';
+
 import 'models/farmer.dart';
 import 'models/milk_collection.dart';
-import 'models/record.dart';
 import 'services/sync_service.dart';
-
+import 'services/farmer_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Hive.initFlutter();
 
+  // Register adapters
   Hive.registerAdapter(FarmerAdapter());
   Hive.registerAdapter(MilkCollectionAdapter());
 
-  await Hive.openBox<Farmer>('farmers');
-  await Hive.openBox<MilkCollection>('milk_collections');
+  // Open boxes only if not already open
+  if (!Hive.isBoxOpen('farmers')) {
+    await Hive.openBox<Farmer>('farmers');
+  }
+  if (!Hive.isBoxOpen('milk_collections')) {
+    await Hive.openBox<MilkCollection>('milk_collections');
+  }
+
+  // Start background listeners
+  SyncService().startSyncListener();
+  FarmerService().startAutoSync();
 
   runApp(const MyApp());
 }
-
-
-// void main() async {
-//   WidgetsFlutterBinding.ensureInitialized();
-//   await Hive.initFlutter();
-
-//   Hive.registerAdapter(MilkCollectionAdapter());
-//   await Hive.openBox<MilkCollection>('milk_collections');
-
-//   runApp(const MyApp());
-// }
-
-
-
-
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
@@ -49,7 +43,6 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'Milk App',
-
       theme: ThemeData(
         scaffoldBackgroundColor: const Color(0xFFF8F9FA),
         appBarTheme: const AppBarTheme(
@@ -62,10 +55,9 @@ class MyApp extends StatelessWidget {
           secondary: Color(0xFF2ECC71),
         ),
       ),
-
       home: const LoginPage(),
       routes: {
-        '/dashboard': (context) => DashboardPage(name: ''), // name set dynamically
+        '/dashboard': (context) => DashboardPage(name: ''),
         '/profile': (context) => ProfilePage(
               name: '',
               email: '',
@@ -77,7 +69,6 @@ class MyApp extends StatelessWidget {
         '/farmersList': (context) => const FarmersListPage(),
         '/login': (context) => const LoginPage(),
       },
-
     );
   }
 }

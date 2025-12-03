@@ -3,9 +3,11 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
-import '../config/app_config.dart';
-import 'farmer_detail_page.dart';
 import 'package:fluttertoast/fluttertoast.dart';
+import 'package:hive/hive.dart';
+import '../config/app_config.dart';
+import '../models/farmer.dart';
+import 'farmer_detail_page.dart';
 
 class FarmersListPage extends StatefulWidget {
   const FarmersListPage({super.key});
@@ -18,7 +20,7 @@ class _FarmersListPageState extends State<FarmersListPage> {
   final TextEditingController _searchController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
 
-  List<dynamic> farmers = [];
+  List<Farmer> farmers = [];
   bool isLoading = true;
   bool isLoadingMore = false;
   bool hasMore = true;
@@ -29,13 +31,14 @@ class _FarmersListPageState extends State<FarmersListPage> {
   Timer? _debounce;
 
   late String apiBase;
+  bool isOnline = true;
 
   @override
   void initState() {
     super.initState();
     apiBase = "${AppConfig.baseUrl}/api";
-    fetchFarmers();
 
+    _checkConnectivityAndFetch();
     _searchController.addListener(_onSearchChanged);
     _scrollController.addListener(_onScroll);
   }
@@ -46,6 +49,16 @@ class _FarmersListPageState extends State<FarmersListPage> {
     _scrollController.dispose();
     _debounce?.cancel();
     super.dispose();
+  }
+
+  Future<void> _checkConnectivityAndFetch() async {
+    try {
+      final res = await http.get(Uri.parse("$apiBase/farmers"), headers: {});
+      isOnline = res.statusCode == 200;
+    } catch (_) {
+      isOnline = false;
+    }
+    fetchFarmers();
   }
 
   void _onSearchChanged() {
@@ -85,45 +98,11 @@ class _FarmersListPageState extends State<FarmersListPage> {
       setState(() => isLoading = true);
     }
 
-    final token = await _getAuthToken();
-    if (token == null) {
-      Fluttertoast.showToast(msg: "Please login first");
-      return;
-    }
-
     try {
-      final queryParams = {
-        'page': currentPage.toString(),
-        'limit': pageSize.toString(),
-        if (searchQuery.isNotEmpty) 'name': searchQuery,
-        if (searchQuery.isNotEmpty) 'farmerID': searchQuery,
-      };
-
-      final uri = Uri.parse("$apiBase/farmers").replace(queryParameters: queryParams);
-
-      final res = await http.get(
-        uri,
-        headers: {"Authorization": "Bearer $token"},
-      );
-
-      if (res.statusCode == 200) {
-        final data = json.decode(res.body)['data'] as List<dynamic>;
-        setState(() {
-          if (loadMore) {
-            farmers.addAll(data);
-          } else {
-            farmers = data;
-          }
-          hasMore = data.length == pageSize;
-          isLoading = false;
-          isLoadingMore = false;
-        });
+      if (isOnline) {
+        await _fetchOnlineFarmers(loadMore: loadMore);
       } else {
-        setState(() {
-          isLoading = false;
-          isLoadingMore = false;
-        });
-        Fluttertoast.showToast(msg: "Failed to fetch farmers");
+        _fetchOfflineFarmers(loadMore: loadMore);
       }
     } catch (e) {
       setState(() {
@@ -134,8 +113,85 @@ class _FarmersListPageState extends State<FarmersListPage> {
     }
   }
 
+  Future<void> _fetchOnlineFarmers({bool loadMore = false}) async {
+    final token = await _getAuthToken();
+    if (token == null) {
+      Fluttertoast.showToast(msg: "Please login first");
+      return;
+    }
+
+    final queryParams = {
+      'page': currentPage.toString(),
+      'limit': pageSize.toString(),
+      if (searchQuery.isNotEmpty) 'name': searchQuery,
+      if (searchQuery.isNotEmpty) 'farmerID': searchQuery,
+    };
+
+    final uri = Uri.parse("$apiBase/farmers").replace(queryParameters: queryParams);
+
+    final res = await http.get(uri, headers: {"Authorization": "Bearer $token"});
+
+    if (res.statusCode == 200) {
+      final data = (json.decode(res.body)['data'] as List<dynamic>)
+          .map((e) => Farmer.fromJson(e))
+          .toList();
+
+      // Save to Hive
+      final box = Hive.box<Farmer>('farmers');
+      for (var f in data) {
+        box.put(f.farmerId, f);
+      }
+
+      setState(() {
+        if (loadMore) {
+          farmers.addAll(data);
+        } else {
+          farmers = data;
+        }
+        hasMore = data.length == pageSize;
+        isLoading = false;
+        isLoadingMore = false;
+      });
+    } else {
+      setState(() {
+        isLoading = false;
+        isLoadingMore = false;
+      });
+      Fluttertoast.showToast(msg: "Failed to fetch farmers online");
+    }
+  }
+
+  void _fetchOfflineFarmers({bool loadMore = false}) {
+    final box = Hive.box<Farmer>('farmers');
+
+    List<Farmer> allFarmers = box.values.toList();
+
+    if (searchQuery.isNotEmpty) {
+      allFarmers = allFarmers.where((f) {
+        final name = "${f.fname} ${f.lname}".toLowerCase();
+        return name.contains(searchQuery.toLowerCase()) ||
+            f.farmerId.toString().contains(searchQuery);
+      }).toList();
+    }
+
+    final start = (currentPage - 1) * pageSize;
+    final end = (start + pageSize) > allFarmers.length ? allFarmers.length : (start + pageSize);
+
+    final pageFarmers = allFarmers.sublist(start, end);
+
+    setState(() {
+      if (loadMore) {
+        farmers.addAll(pageFarmers);
+      } else {
+        farmers = pageFarmers;
+      }
+      hasMore = end < allFarmers.length;
+      isLoading = false;
+      isLoadingMore = false;
+    });
+  }
+
   void pickDateRange() {
-    // Implement date filter if needed
     Fluttertoast.showToast(msg: "Filter tapped (not implemented)");
   }
 
@@ -167,7 +223,6 @@ class _FarmersListPageState extends State<FarmersListPage> {
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
               child: Row(
                 children: [
-                  // LEFT SIDE
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -200,7 +255,6 @@ class _FarmersListPageState extends State<FarmersListPage> {
                       ],
                     ),
                   ),
-                  // RIGHT SIDE FILTER ICON
                   Container(
                     decoration: BoxDecoration(
                       color: Colors.white.withOpacity(0.25),
@@ -268,17 +322,17 @@ class _FarmersListPageState extends State<FarmersListPage> {
                             leading: CircleAvatar(
                               backgroundColor: Colors.green.shade700,
                               child: Text(
-                                farmer['fname'][0],
+                                farmer.fname[0],
                                 style: const TextStyle(color: Colors.white),
                               ),
                             ),
                             title: Text(
-                              "${farmer['fname']} ${farmer['lname']}",
+                              "${farmer.fname} ${farmer.lname}",
                               style: const TextStyle(
                                   fontWeight: FontWeight.w600),
                             ),
                             subtitle: Text(
-                              "Farmer ID: ${farmer['farmerID']}",
+                              "Farmer ID: ${farmer.farmerId}",
                               style:
                                   TextStyle(color: Colors.grey.shade600),
                             ),
@@ -292,7 +346,9 @@ class _FarmersListPageState extends State<FarmersListPage> {
                                 context,
                                 MaterialPageRoute(
                                   builder: (_) =>
-                                      FarmerDetailPage(farmerId: farmer['id']),
+                                      // FarmerDetailPage(farmerId: farmer.id),
+                                      FarmerDetailPage(farmerId: farmer.farmerId),
+
                                 ),
                               );
                             },

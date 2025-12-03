@@ -2,22 +2,22 @@ import 'package:hive/hive.dart';
 
 part 'farmer.g.dart';
 
-@HiveType(typeId: 1)
-class Farmer {
+@HiveType(typeId: 0)
+class Farmer extends HiveObject {
   @HiveField(0)
-  final int farmerId;
+  int farmerId;
 
   @HiveField(1)
-  final String fname;
+  String fname;
 
   @HiveField(2)
-  final String lname;
+  String lname;
 
   @HiveField(3)
-  final String centerName;
+  String centerName;
 
   @HiveField(4)
-  final String contact;
+  String contact;
 
   Farmer({
     required this.farmerId,
@@ -29,11 +29,19 @@ class Farmer {
 
   factory Farmer.fromJson(Map<String, dynamic> json) {
     return Farmer(
-      farmerId: json['farmerID'],
-      fname: json['fname'],
-      lname: json['lname'],
-      centerName: json['center_name'],
-      contact: json['contact1'],
+      farmerId: json['farmerID'] is int ? json['farmerID'] : int.parse('${json['farmerID']}'),
+      fname: json['fname']?.toString() ?? '',
+      lname: json['lname']?.toString() ?? '',
+      centerName: json['center_name']?.toString() ?? json['centerName']?.toString() ?? '',
+      contact: json['contact1']?.toString() ?? json['contact']?.toString() ?? '',
     );
   }
+
+  Map<String, dynamic> toJson() => {
+        'farmerID': farmerId,
+        'fname': fname,
+        'lname': lname,
+        'center_name': centerName,
+        'contact1': contact,
+      };
 }

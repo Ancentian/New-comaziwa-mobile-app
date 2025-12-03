@@ -34,4 +34,16 @@ class MilkCollection extends HiveObject {
     required this.rejected,
     this.isSynced = false,
   });
+
+  Map<String, dynamic> toJson() {
+    return {
+      "id": id,
+      "farmer_id": farmerId,
+      "collection_date": date,
+      "morning": morning,
+      "evening": evening,
+      "rejected": rejected,
+      "is_synced": isSynced,
+    };
+  }
 }

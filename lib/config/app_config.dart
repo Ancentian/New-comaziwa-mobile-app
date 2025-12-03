@@ -5,9 +5,10 @@ class AppConfig {
 
   static String get baseUrl {
     if (isLocal) {
-      return "http://192.168.0.159:8000"; // for physical device
+      // return "http://192.168.0.159:8000"; // for physical device
+      return "http://192.168.100.19:8000";
     } else {
-      return "https://your-production-domain.com";
+      return "https://kathande.embucomaziwa.co.ke";
     }
   }
 

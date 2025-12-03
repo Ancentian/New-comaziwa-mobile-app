@@ -1,17 +1,19 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
+import 'package:hive_flutter/hive_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:intl/intl.dart';
 import 'package:http/http.dart' as http;
-import 'dart:convert';
-import 'package:comaziwa/screens/login_page.dart';
-import '../config/app_config.dart';
 import 'package:fluttertoast/fluttertoast.dart';
-import 'dart:async';
-// import 'bluetooth_device_list_page.dart';
 
-import '../models/record.dart';
-import '../services/local_storage_service.dart';
+import '../config/app_config.dart';
+import '../models/farmer.dart';
+import '../models/milk_collection.dart';
+import '../services/sync_service.dart';
+import 'login_page.dart';
 
 class DashboardPage extends StatefulWidget {
   final String name;
@@ -35,10 +37,14 @@ class _DashboardPageState extends State<DashboardPage>
   DateTimeRange? selectedRange;
   bool isLoading = true;
 
+  int totalFarmers = 0;
+  int unsyncedCollections = 0;
+
   @override
   void initState() {
     super.initState();
     apiBase = "${AppConfig.baseUrl}/api";
+
     _controller = AnimationController(
         vsync: this, duration: const Duration(milliseconds: 800));
     _animation = CurvedAnimation(parent: _controller, curve: Curves.easeInOut);
@@ -49,12 +55,25 @@ class _DashboardPageState extends State<DashboardPage>
     selectedRange = DateTimeRange(start: start, end: now);
 
     fetchDashboardData(range: selectedRange);
+    _loadSyncStats();
 
-    // 🚀 Auto refresh every 30 seconds
+    // Auto refresh every 30 seconds
     Timer.periodic(const Duration(seconds: 30), (timer) {
       if (mounted) {
         fetchDashboardData(range: selectedRange);
+        _loadSyncStats();
       }
+    });
+  }
+
+  Future<void> _loadSyncStats() async {
+    final farmersBox = Hive.box<Farmer>('farmers');
+    final milkBox = Hive.box<MilkCollection>('milk_collections');
+
+    setState(() {
+      totalFarmers = farmersBox.length;
+      unsyncedCollections =
+          milkBox.values.where((c) => !c.isSynced).length;
     });
   }
 
@@ -64,9 +83,7 @@ class _DashboardPageState extends State<DashboardPage>
   }
 
   Future<void> fetchDashboardData({DateTimeRange? range}) async {
-    setState(() {
-      isLoading = true;
-    });
+    setState(() => isLoading = true);
     try {
       final token = await _getAuthToken();
 
@@ -93,18 +110,14 @@ class _DashboardPageState extends State<DashboardPage>
           isLoading = false;
         });
       } else {
-        setState(() {
-          isLoading = false;
-        });
+        setState(() => isLoading = false);
         Fluttertoast.showToast(
           msg: "Failed to fetch data from server.",
           backgroundColor: Colors.redAccent,
         );
       }
     } catch (e) {
-      setState(() {
-        isLoading = false;
-      });
+      setState(() => isLoading = false);
       Fluttertoast.showToast(
         msg: "Error: $e",
         backgroundColor: Colors.redAccent,
@@ -113,8 +126,8 @@ class _DashboardPageState extends State<DashboardPage>
   }
 
   Future<void> pickDateRange() async {
-    final DateTime now = DateTime.now();
-    final DateTimeRange? picked = await showDateRangePicker(
+    final now = DateTime.now();
+    final picked = await showDateRangePicker(
       context: context,
       firstDate: DateTime(now.year - 2),
       lastDate: DateTime(now.year + 1),
@@ -122,9 +135,7 @@ class _DashboardPageState extends State<DashboardPage>
     );
 
     if (picked != null) {
-      setState(() {
-        selectedRange = picked;
-      });
+      setState(() => selectedRange = picked);
       fetchDashboardData(range: picked);
     }
   }
@@ -142,28 +153,39 @@ class _DashboardPageState extends State<DashboardPage>
   }
 
   Future<Map<String, dynamic>?> _getUserProfile() async {
-  final token = await _getAuthToken();
-  if (token == null) return null;
+    final token = await _getAuthToken();
+    if (token == null) return null;
 
-  try {
-    final res = await http.get(
-      Uri.parse("$apiBase/employee/profile"), // your API endpoint
-      headers: {
-        'Accept': 'application/json',
-        'Authorization': 'Bearer $token',
-      },
-    );
-
-    if (res.statusCode == 200) {
-      final data = json.decode(res.body);
-      return data['employee']; // adapt to your API response
+    try {
+      final res = await http.get(
+        Uri.parse("$apiBase/employee/profile"),
+        headers: {
+          'Accept': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
+      );
+      if (res.statusCode == 200) {
+        final data = json.decode(res.body);
+        return data['employee'];
+      }
+    } catch (e) {
+      debugPrint("Error fetching profile: $e");
     }
-  } catch (e) {
-    debugPrint("Error fetching profile: $e");
+    return null;
   }
-  return null;
-}
 
+  Future<void> _syncNow() async {
+    Fluttertoast.showToast(msg: "Syncing...", backgroundColor: Colors.green);
+    final success = await SyncService().syncAll();
+    if (success) {
+      Fluttertoast.showToast(
+          msg: "All data synced successfully", backgroundColor: Colors.green);
+    } else {
+      Fluttertoast.showToast(
+          msg: "Some data could not be synced", backgroundColor: Colors.red);
+    }
+    _loadSyncStats();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -175,99 +197,9 @@ class _DashboardPageState extends State<DashboardPage>
         title: const Text('Dashboard'),
         backgroundColor: Colors.green.shade700,
         elevation: 2,
-        actions: [
-          IconButton(onPressed: _logout, icon: const Icon(Icons.logout))
-        ],
+        actions: [IconButton(onPressed: _logout, icon: const Icon(Icons.logout))],
       ),
-      
-      drawer: Drawer(
-        child: Container(
-          color: Colors.green.shade700,
-          child: ListView(
-            padding: EdgeInsets.zero,
-            children: [
-              UserAccountsDrawerHeader(
-                decoration: BoxDecoration(color: Colors.green.shade800),
-                currentAccountPicture: const CircleAvatar(
-                  backgroundColor: Colors.white,
-                  child: Icon(Icons.person, size: 40, color: Colors.green),
-                ),
-                accountName: Text(
-                  widget.name,
-                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                ),
-                accountEmail: FutureBuilder<Map<String, dynamic>?>(
-                  future: _getUserProfile(),
-                  builder: (context, snapshot) {
-                    if (snapshot.connectionState == ConnectionState.waiting) {
-                      return const Text('Loading...');
-                    } else if (snapshot.hasData) {
-                      return Text(snapshot.data?['role'] ?? 'User');
-                    } else {
-                      return const Text('User');
-                    }
-                  },
-                ),
-              ),
-              Container(
-                decoration: const BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.only(
-                    topLeft: Radius.circular(20),
-                    topRight: Radius.circular(20),
-                  ),
-                ),
-                child: Column(
-                  children: [
-                    ListTile(
-                      leading: const Icon(Icons.person, color: Colors.green),
-                      title: const Text('Profile'),
-                      onTap: () async {
-                        final userData = await _getUserProfile();
-                        if (userData != null) {
-                          Navigator.pushNamed(context, '/profile', arguments: {
-                            'name': userData['name'],
-                            'email': userData['email'],
-                            'phone': userData['phone_no'],
-                            'role': userData['role'],
-                          });
-                        }
-                      },
-                    ),
-                    ListTile(
-                      leading: const Icon(Icons.dashboard, color: Colors.green),
-                      title: const Text('Dashboard'),
-                      onTap: () => Navigator.pushNamed(context, '/dashboard'),
-                    ),
-                    ListTile(
-                      leading: const Icon(Icons.local_drink, color: Colors.green),
-                      title: const Text('Milk Collection'),
-                      onTap: () => Navigator.pushNamed(context, '/milkCollection'),
-                    ),
-                    ListTile(
-                      leading: const Icon(Icons.list, color: Colors.green),
-                      title: const Text('Milk List'),
-                      onTap: () => Navigator.pushNamed(context, '/milkList'),
-                    ),
-                    ListTile(
-                      leading: const Icon(Icons.people, color: Colors.green),
-                      title: const Text('Members List'),
-                      onTap: () => Navigator.pushNamed(context, '/farmersList'),
-                    ),
-                    const Divider(),
-                    ListTile(
-                      leading: const Icon(Icons.logout, color: Colors.red),
-                      title: const Text('Logout'),
-                      onTap: _logout,
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-
+      drawer: _buildDrawer(),
       body: isLoading
           ? const Center(child: CircularProgressIndicator())
           : SingleChildScrollView(
@@ -275,56 +207,7 @@ class _DashboardPageState extends State<DashboardPage>
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // Print Button
-                  // Padding(
-                  //   padding:
-                  //       const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                  //   child: ElevatedButton.icon(
-                  //     onPressed: () {
-                  //       Navigator.push(
-                  //         context,
-                  //         MaterialPageRoute(
-                  //           builder: (_) => const BluetoothDeviceListPage(),
-                  //         ),
-                  //       );
-                  //     },
-                  //     icon: const Icon(Icons.print),
-                  //     label: const Text("Print Milk Report"),
-                  //     style: ElevatedButton.styleFrom(
-                  //       backgroundColor: Colors.green,
-                  //       minimumSize: Size(screenWidth, 50),
-                  //       shape: RoundedRectangleBorder(
-                  //           borderRadius: BorderRadius.circular(12)),
-                  //     ),
-                  //   ),
-                  // ),
-
-                  // Greeting + Filter
-                  Padding(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            'Hello, ${widget.name}!',
-                            style: const TextStyle(
-                              fontSize: 22,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                        ),
-                        IconButton(
-                          icon: const Icon(Icons.filter_alt_rounded,
-                              color: Colors.green, size: 28),
-                          tooltip: 'Filter by Date',
-                          onPressed: pickDateRange,
-                        ),
-                      ],
-                    ),
-                  ),
-
-                  // Stat Cards
+                  _buildGreetingRow(screenWidth),
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 16),
                     child: Wrap(
@@ -352,13 +235,34 @@ class _DashboardPageState extends State<DashboardPage>
                           Colors.blue,
                           width: (screenWidth - 48) / 2,
                         ),
+                        _buildStatCard(
+                          'Farmers',
+                          '$totalFarmers',
+                          Icons.people,
+                          Colors.purple,
+                          width: (screenWidth - 48) / 2,
+                        ),
+                        _buildStatCard(
+                          'Unsynced',
+                          '$unsyncedCollections',
+                          Icons.sync,
+                          Colors.red,
+                          width: (screenWidth - 48) / 2,
+                        ),
+                        GestureDetector(
+                          onTap: _syncNow,
+                          child: _buildStatCard(
+                            'Sync Now',
+                            'Tap to sync',
+                            Icons.cloud_upload,
+                            Colors.teal,
+                            width: (screenWidth - 48) / 2,
+                          ),
+                        ),
                       ],
                     ),
                   ),
-
                   const SizedBox(height: 24),
-
-                  // Charts
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 16),
                     child: Column(
@@ -377,7 +281,99 @@ class _DashboardPageState extends State<DashboardPage>
     );
   }
 
-  // Stat Card
+  Widget _buildGreetingRow(double screenWidth) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              'Hello, ${widget.name}!',
+              style: const TextStyle(
+                fontSize: 22,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.filter_alt_rounded,
+                color: Colors.green, size: 28),
+            tooltip: 'Filter by Date',
+            onPressed: pickDateRange,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDrawer() {
+    return Drawer(
+      child: Container(
+        color: Colors.green.shade700,
+        child: ListView(
+          padding: EdgeInsets.zero,
+          children: [
+            UserAccountsDrawerHeader(
+              decoration: BoxDecoration(color: Colors.green.shade800),
+              currentAccountPicture: const CircleAvatar(
+                backgroundColor: Colors.white,
+                child: Icon(Icons.person, size: 40, color: Colors.green),
+              ),
+              accountName: Text(
+                widget.name,
+                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              ),
+              accountEmail: FutureBuilder<Map<String, dynamic>?>(
+                future: _getUserProfile(),
+                builder: (context, snapshot) {
+                  if (snapshot.connectionState == ConnectionState.waiting) {
+                    return const Text('Loading...');
+                  } else if (snapshot.hasData) {
+                    return Text(snapshot.data?['role'] ?? 'User');
+                  } else {
+                    return const Text('User');
+                  }
+                },
+              ),
+            ),
+            Container(
+              decoration: const BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.only(
+                  topLeft: Radius.circular(20),
+                  topRight: Radius.circular(20),
+                ),
+              ),
+              child: Column(
+                children: [
+                  _drawerTile(Icons.person, 'Profile', '/profile'),
+                  _drawerTile(Icons.dashboard, 'Dashboard', '/dashboard'),
+                  _drawerTile(Icons.local_drink, 'Milk Collection', '/milkCollection'),
+                  _drawerTile(Icons.list, 'Milk List', '/milkList'),
+                  _drawerTile(Icons.people, 'Members List', '/farmersList'),
+                  const Divider(),
+                  ListTile(
+                    leading: const Icon(Icons.logout, color: Colors.red),
+                    title: const Text('Logout'),
+                    onTap: _logout,
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  ListTile _drawerTile(IconData icon, String title, String route) {
+    return ListTile(
+      leading: Icon(icon, color: Colors.green),
+      title: Text(title),
+      onTap: () => Navigator.pushNamed(context, route),
+    );
+  }
+
   Widget _buildStatCard(String title, String value, IconData icon, Color color,
       {double width = 150}) {
     return Container(
@@ -426,7 +422,7 @@ class _DashboardPageState extends State<DashboardPage>
     );
   }
 
-  // Daily Bar Chart
+  // ------------------------ Charts ------------------------
   Widget _buildDailyBarChart() {
     if (dailyData.isEmpty) return const SizedBox.shrink();
 
@@ -488,10 +484,7 @@ class _DashboardPageState extends State<DashboardPage>
                       ),
                     ),
                     leftTitles: const AxisTitles(
-                      sideTitles: SideTitles(
-                        showTitles: true,
-                        reservedSize: 36,
-                      ),
+                      sideTitles: SideTitles(showTitles: true, reservedSize: 36),
                     ),
                   ),
                   barGroups: bars,
@@ -508,7 +501,6 @@ class _DashboardPageState extends State<DashboardPage>
                       },
                     ),
                   ),
-
                 ),
               ),
             ),
@@ -518,7 +510,6 @@ class _DashboardPageState extends State<DashboardPage>
     );
   }
 
-  // Monthly Line Chart
   Widget _buildMonthlyLineChart() {
     if (monthlyData.isEmpty) return const SizedBox.shrink();
 
@@ -561,10 +552,7 @@ class _DashboardPageState extends State<DashboardPage>
                       ),
                     ),
                     leftTitles: const AxisTitles(
-                      sideTitles: SideTitles(
-                        showTitles: true,
-                        reservedSize: 36,
-                      ),
+                      sideTitles: SideTitles(showTitles: true, reservedSize: 36),
                     ),
                   ),
                   lineBarsData: [
@@ -586,8 +574,8 @@ class _DashboardPageState extends State<DashboardPage>
                         return touchedSpots.map((spot) {
                           final monthIndex = spot.x.toInt() % 12;
                           final months = [
-                            'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                            'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+                            'Jan','Feb','Mar','Apr','May','Jun',
+                            'Jul','Aug','Sep','Oct','Nov','Dec'
                           ];
                           return LineTooltipItem(
                             "${months[monthIndex]}\n${spot.y.toStringAsFixed(2)} L",
@@ -597,7 +585,6 @@ class _DashboardPageState extends State<DashboardPage>
                       },
                     ),
                   ),
-
                 ),
               ),
             ),
@@ -607,7 +594,6 @@ class _DashboardPageState extends State<DashboardPage>
     );
   }
 
-  // Milk Pie Chart
   Widget _buildMilkPieChart() {
     if (monthlyData.isEmpty) return const SizedBox.shrink();
 
@@ -616,6 +602,12 @@ class _DashboardPageState extends State<DashboardPage>
     final totalEvening = monthlyData.fold<double>(
         0, (sum, item) => sum + ((item['total_evening'] ?? 0) * 1.0));
 
+    final total = totalMorning + totalEvening;
+    if (total == 0) return const SizedBox.shrink();
+
+    final morningPercent = totalMorning / total * 100;
+    final eveningPercent = totalEvening / total * 100;
+
     return Card(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       elevation: 4,
@@ -623,7 +615,7 @@ class _DashboardPageState extends State<DashboardPage>
         padding: const EdgeInsets.all(16),
         child: Column(
           children: [
-            const Text("Milk Distribution (Litres)",
+            const Text("Morning vs Evening Milk",
                 style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
             const SizedBox(height: 16),
             SizedBox(
@@ -632,26 +624,28 @@ class _DashboardPageState extends State<DashboardPage>
                 PieChartData(
                   sections: [
                     PieChartSectionData(
-                      value: totalMorning,
-                      title: 'Morning',
-                      color: Colors.green,
-                      radius: 50,
+                      color: Colors.orange,
+                      value: morningPercent,
+                      title: "Morning\n${morningPercent.toStringAsFixed(1)}%",
+                      radius: 60,
                       titleStyle: const TextStyle(
-                          fontSize: 14,
+                          fontSize: 12,
                           fontWeight: FontWeight.bold,
                           color: Colors.white),
                     ),
                     PieChartSectionData(
-                      value: totalEvening,
-                      title: 'Evening',
                       color: Colors.blue,
-                      radius: 50,
+                      value: eveningPercent,
+                      title: "Evening\n${eveningPercent.toStringAsFixed(1)}%",
+                      radius: 60,
                       titleStyle: const TextStyle(
-                          fontSize: 14,
+                          fontSize: 12,
                           fontWeight: FontWeight.bold,
                           color: Colors.white),
                     ),
                   ],
+                  sectionsSpace: 4,
+                  centerSpaceRadius: 40,
                 ),
               ),
             ),
