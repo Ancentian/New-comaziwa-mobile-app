@@ -21,10 +21,15 @@ class MilkCollectionPage extends StatefulWidget {
 
 class _MilkCollectionPageState extends State<MilkCollectionPage>
     with SingleTickerProviderStateMixin {
+
   final TextEditingController _memberNoController = TextEditingController();
   final TextEditingController _morningController = TextEditingController(text: "0");
   final TextEditingController _eveningController = TextEditingController(text: "0");
   final TextEditingController _rejectedController = TextEditingController(text: "0");
+
+  // error flags for validation
+  bool _morningError = false;
+  bool _eveningError = false;
 
   double total = 0.0;
   Map<String, dynamic>? farmer;
@@ -81,40 +86,123 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
     return prefs.getString('token');
   }
 
-  /// Offline-first farmer search
-  Future<void> searchFarmer(String memberNo) async {
-  if (memberNo.isEmpty) return;
+  // /// Offline-first farmer search
+  // Future<void> searchFarmer(String memberNo) async {
+  //   if (memberNo.isEmpty) return;
 
-  final farmersBox = Hive.box<Farmer>('farmers');
+  //   final farmersBox = Hive.box<Farmer>('farmers');
 
-  // 1. Try offline search
-  final cached = farmersBox.values.cast<Farmer?>().firstWhere(
-        (f) => f != null && f.farmerId.toString() == memberNo,
-        orElse: () => null,
-      );
+  //   // 1. Try offline search
+  //   final cached = farmersBox.values.cast<Farmer?>().firstWhere(
+  //         (f) => f != null && f.farmerId.toString() == memberNo,
+  //         orElse: () => null,
+  //       );
 
-  if (cached != null) {
-    setState(() {
-      farmer = {
-        "farmerID": cached.farmerId,
-        "fname": cached.fname,
-        "lname": cached.lname,
-        "center_name": cached.centerName,
-        "contact1": cached.contact,
-      };
-    });
-    Fluttertoast.showToast(
-      msg: "Farmer loaded offline",
-      backgroundColor: Colors.green,
-      textColor: Colors.white,
-    );
-    _animationController.forward(from: 0);
-    return;
-  }
+  //   if (cached != null) {
+  //     setState(() {
+  //       farmer = {
+  //         "farmerID": cached.farmerId,
+  //         "fname": cached.fname,
+  //         "lname": cached.lname,
+  //         "center_name": cached.centerName,
+  //         "contact1": cached.contact,
+  //       };
+  //     });
+  //     Fluttertoast.showToast(
+  //       msg: "Farmer loaded offline",
+  //       backgroundColor: Colors.green,
+  //       textColor: Colors.white,
+  //     );
+  //     _animationController.forward(from: 0);
+  //     return;
+  //   }
 
-  // 2. Online search
+  //   // 2. Online search
+  //   _debounce?.cancel();
+  //   _debounce = Timer(const Duration(milliseconds: 500), () async {
+  //     final token = await _getAuthToken();
+  //     if (token == null) {
+  //       Fluttertoast.showToast(
+  //         msg: "Login required",
+  //         backgroundColor: Colors.red,
+  //         textColor: Colors.white,
+  //       );
+  //       return;
+  //     }
+
+  //     try {
+  //       final res = await http.get(
+  //         Uri.parse("$apiBase/find-farmer/$memberNo"),
+  //         headers: {"Authorization": "Bearer $token"},
+  //       );
+
+  //       if (res.statusCode == 200) {
+  //         final data = json.decode(res.body);
+  //         final f = Farmer.fromJson(data['farmer']);
+
+  //         // Save offline
+  //         farmersBox.put(f.farmerId, f);
+
+  //         setState(() => farmer = data['farmer']);
+  //         Fluttertoast.showToast(
+  //           msg: "Farmer loaded online",
+  //           backgroundColor: Colors.green,
+  //           textColor: Colors.white,
+  //         );
+  //         _animationController.forward(from: 0);
+  //       } else {
+  //         Fluttertoast.showToast(
+  //           msg: "Farmer not found",
+  //           backgroundColor: Colors.red,
+  //           textColor: Colors.white,
+  //         );
+  //       }
+  //     } catch (_) {
+  //       Fluttertoast.showToast(
+  //         msg: "No internet — offline search only",
+  //         backgroundColor: Colors.orange,
+  //         textColor: Colors.white,
+  //       );
+  //     }
+  //   });
+  // }
+  /// Offline-first farmer search with debounce
+Future<void> searchFarmer(String memberNo) async {
+  // Cancel any previous debounce
   _debounce?.cancel();
-  _debounce = Timer(const Duration(milliseconds: 500), () async {
+
+  // Start a new debounce timer
+  _debounce = Timer(const Duration(milliseconds: 400), () async {
+    if (memberNo.isEmpty) return;
+
+    final farmersBox = Hive.box<Farmer>('farmers');
+
+    // 1. Try offline search first
+    final cached = farmersBox.values.cast<Farmer?>().firstWhere(
+      (f) => f != null && f.farmerId.toString() == memberNo,
+      orElse: () => null,
+    );
+
+    if (cached != null) {
+      setState(() {
+        farmer = {
+          "farmerID": cached.farmerId,
+          "fname": cached.fname,
+          "lname": cached.lname,
+          "center_name": cached.centerName,
+          "contact1": cached.contact,
+        };
+      });
+      Fluttertoast.showToast(
+        msg: "Farmer loaded offline",
+        backgroundColor: Colors.green,
+        textColor: Colors.white,
+      );
+      _animationController.forward(from: 0);
+      return; // Stop here if found offline
+    }
+
+    // 2. Online search if not found offline
     final token = await _getAuthToken();
     if (token == null) {
       Fluttertoast.showToast(
@@ -165,30 +253,59 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
 
   /// Submit milk collection (offline-first, sync later)
   Future<void> _submitCollection() async {
-    if (farmer == null) {
-      Fluttertoast.showToast(msg: "Please select farmer");
-      return;
-    }
-
-    final collection = MilkCollection(
-      farmerId: farmer!['farmerID'],
-      date: DateFormat('yyyy-MM-dd').format(selectedDate),
-      morning: double.parse(_morningController.text),
-      evening: double.parse(_eveningController.text),
-      rejected: double.parse(_rejectedController.text),
-      isSynced: false,
-    );
-
-    // Save offline
-    final box = Hive.box<MilkCollection>('milk_collections');
-    await box.add(collection);
-
-    // Try syncing immediately
-    await SyncService().syncCollections();
-
-    Fluttertoast.showToast(msg: "Collection saved locally!");
-    _resetForm();
+  if (farmer == null) {
+    Fluttertoast.showToast(msg: "Please select farmer");
+    return;
   }
+
+  double morning = double.tryParse(_morningController.text) ?? 0;
+  double evening = double.tryParse(_eveningController.text) ?? 0;
+
+  // ============================
+  //  VALIDATION RULE
+  // ============================
+  if (morning <= 0 && evening <= 0) {
+    setState(() {
+      _morningError = true;
+      _eveningError = true;
+    });
+
+    Fluttertoast.showToast(
+      msg: "Morning or Evening must be greater than 0",
+      backgroundColor: Colors.red,
+      textColor: Colors.white,
+    );
+    return; // STOP submission
+  }
+
+  setState(() {
+    _morningError = false;
+    _eveningError = false;
+  });
+
+  final collection = MilkCollection(
+    farmerId: int.parse(farmer!['farmerID'].toString()),
+    date: DateFormat('yyyy-MM-dd').format(selectedDate),
+    morning: morning,
+    evening: evening,
+    rejected: double.tryParse(_rejectedController.text) ?? 0,
+    isSynced: false,
+  );
+
+  // Save offline
+  final box = Hive.box<MilkCollection>('milk_collections');
+  await box.add(collection);
+
+  bool success = await SyncService().syncCollections();
+  Fluttertoast.showToast(
+    msg: success ? "Collection synced!" : "Saved offline",
+    backgroundColor: success ? Colors.green : Colors.orange,
+    textColor: Colors.white,
+  );
+
+  _resetForm();
+}
+
 
   void _resetForm() {
     _morningController.text = '0';
@@ -213,6 +330,9 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
     if (picked != null) setState(() => selectedDate = picked);
   }
 
+  /// ----------------------------
+  /// UI BUILD
+  /// ----------------------------
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -220,6 +340,19 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
         title: const Text('Milk Collection Dashboard'),
         backgroundColor: Colors.green.shade700,
         elevation: 2,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.sync),
+            onPressed: () async {
+              bool success = await SyncService().syncCollections();
+              Fluttertoast.showToast(
+                msg: success ? "Collections synced!" : "No collections to sync",
+                backgroundColor: success ? Colors.green : Colors.orange,
+                textColor: Colors.white,
+              );
+            },
+          ),
+        ],
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
@@ -277,65 +410,6 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
                 builder: (context, value, child) {
                   return _buildTotalField(value);
                 },
-              ),
-
-              const SizedBox(height: 30),
-
-              Card(
-                elevation: 4,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    children: [
-                      const Text(
-                        "Daily Collection Trend",
-                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-                      ),
-                      const SizedBox(height: 16),
-                      SizedBox(
-                        height: 200,
-                        child: BarChart(
-                          BarChartData(
-                            borderData: FlBorderData(show: false),
-                            gridData: const FlGridData(show: true),
-                            titlesData: FlTitlesData(
-                              bottomTitles: AxisTitles(
-                                  sideTitles: SideTitles(
-                                showTitles: true,
-                                getTitlesWidget: (value, meta) {
-                                  const days = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
-                                  return Text(days[value.toInt()%7]);
-                                },
-                              )),
-                              leftTitles: const AxisTitles(
-                                sideTitles: SideTitles(showTitles: true),
-                              ),
-                            ),
-                            barGroups: List.generate(7, (i) => BarChartGroupData(
-                              x: i,
-                              barRods: [
-                                BarChartRodData(
-                                  toY: (i+5).toDouble(),
-                                  width: 16,
-                                  color: Colors.green,
-                                  borderRadius: BorderRadius.circular(6),
-                                  backDrawRodData: BackgroundBarChartRodData(
-                                    show: true,
-                                    toY: 15,
-                                    color: Colors.green.withOpacity(0.2),
-                                  ),
-                                ),
-                              ],
-                            )),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
               ),
 
               const SizedBox(height: 30),
@@ -419,18 +493,35 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
     );
   }
 
-  Widget _buildInput(TextEditingController controller, String label) {
-    return TextField(
-      controller: controller,
-      decoration: InputDecoration(
-        labelText: label,
-        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-        fillColor: Colors.green.shade50,
-        filled: true,
+  // Widget _buildInput(TextEditingController controller, String label) {
+  //   return TextField(
+  //     controller: controller,
+  //     decoration: InputDecoration(
+  //       labelText: label,
+  //       border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+  //       fillColor: Colors.green.shade50,
+  //       filled: true,
+  //     ),
+  //     keyboardType: TextInputType.number,
+  //   );
+  // }
+
+  Widget _buildInput(TextEditingController controller, String label, {bool error = false}) {
+  return TextField(
+    controller: controller,
+    decoration: InputDecoration(
+      labelText: label,
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(12),
       ),
-      keyboardType: TextInputType.number,
-    );
-  }
+      fillColor: Colors.green.shade50,
+      filled: true,
+      errorText: error ? 'Value must be > 0' : null,
+    ),
+    keyboardType: TextInputType.number,
+  );
+}
+
 
   Widget _buildTotalField(double value) {
     return TextFormField(

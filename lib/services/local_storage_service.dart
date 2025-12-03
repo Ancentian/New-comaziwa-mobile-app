@@ -1,25 +1,38 @@
 import 'package:hive/hive.dart';
 import '../models/milk_collection.dart';
+import '../models/farmer.dart';
 
 class LocalStorageService {
   static final LocalStorageService _instance = LocalStorageService._internal();
   factory LocalStorageService() => _instance;
   LocalStorageService._internal();
 
-  final String boxName = 'milk_collections';
+  Future<Box<Farmer>> farmersBox() async => Hive.box<Farmer>('farmers');
+  Future<Box<MilkCollection>> milkBox() async => Hive.box<MilkCollection>('milk_collections');
 
-  Future<void> saveCollection(MilkCollection collection) async {
-    final box = await Hive.openBox<MilkCollection>(boxName);
-    await box.add(collection);
+  // helper save
+  Future<void> saveFarmer(Farmer f) async {
+    final box = await farmersBox();
+    await box.put(f.farmerId, f);
   }
 
-  Future<List<MilkCollection>> getAllCollections() async {
-    final box = await Hive.openBox<MilkCollection>(boxName);
+  Future<Farmer?> getFarmer(int id) async {
+    final box = await farmersBox();
+    return box.get(id);
+  }
+
+  Future<List<Farmer>> getAllFarmers() async {
+    final box = await farmersBox();
     return box.values.toList();
   }
 
-  Future<void> clearAll() async {
-    final box = await Hive.openBox<MilkCollection>(boxName);
-    await box.clear();
+  Future<void> saveCollection(MilkCollection c) async {
+    final box = await milkBox();
+    await box.add(c);
+  }
+
+  Future<List<MilkCollection>> getAllCollections() async {
+    final box = await milkBox();
+    return box.values.toList();
   }
 }
