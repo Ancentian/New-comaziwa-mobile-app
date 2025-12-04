@@ -2,48 +2,57 @@ import 'package:hive/hive.dart';
 
 part 'milk_collection.g.dart';
 
-@HiveType(typeId: 2)
+@HiveType(typeId: 1)
 class MilkCollection extends HiveObject {
   @HiveField(0)
-  int? id; // optional: assigned by server
-
-  @HiveField(1)
   int farmerId;
 
-  @HiveField(2)
-  String date; // 'yyyy-MM-dd'
+  @HiveField(1)
+  String date;
 
-  @HiveField(3)
+  @HiveField(2)
   double morning;
 
-  @HiveField(4)
+  @HiveField(3)
   double evening;
 
-  @HiveField(5)
+  @HiveField(4)
   double rejected;
 
-  @HiveField(6)
+  @HiveField(5)
   bool isSynced;
 
+  @HiveField(6)
+  String? center_name;
+
+  @HiveField(7)
+  String? fname;
+
+  @HiveField(8)
+  String? lname;
+
   MilkCollection({
-    this.id,
     required this.farmerId,
     required this.date,
     required this.morning,
     required this.evening,
     required this.rejected,
-    this.isSynced = false,
+    required this.isSynced,
+    this.center_name,
+    this.fname,
+    this.lname,
   });
 
   Map<String, dynamic> toJson() {
     return {
-      "id": id,
-      "farmer_id": farmerId,
+      "farmerID": farmerId,
       "collection_date": date,
       "morning": morning,
       "evening": evening,
       "rejected": rejected,
-      "is_synced": isSynced,
+      "center_name": center_name,
+      "fname": fname,
+      "lname": lname,
     };
   }
 }

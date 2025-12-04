@@ -290,6 +290,9 @@ Future<void> searchFarmer(String memberNo) async {
     evening: evening,
     rejected: double.tryParse(_rejectedController.text) ?? 0,
     isSynced: false,
+    center_name: farmer!['center_name'],
+    fname: farmer!['fname'],
+    lname: farmer!['lname'],
   );
 
   // Save offline
