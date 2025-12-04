@@ -51,7 +51,11 @@ class _LoginPageState extends State<LoginPage> {
           await prefs.setString('token', data['token']);
           await prefs.setString('user_email', email);
 
-          Fluttertoast.showToast(msg: "Login successful");
+          Fluttertoast.showToast(
+            msg: "Login successful", 
+            backgroundColor: Colors.green,
+            textColor: Colors.white,
+          );
 
           // -----------------------------
           // 🔥 STEP 1: SYNC FARMERS
@@ -74,15 +78,24 @@ class _LoginPageState extends State<LoginPage> {
           Navigator.pushReplacementNamed(context, '/dashboard');
 
         } else {
-          Fluttertoast.showToast(msg: data['message'] ?? "Login failed");
+          Fluttertoast.showToast(msg: data['message'] ?? "Login failed", 
+              backgroundColor: Colors.red,
+              textColor: Colors.white,
+          );
         }
       } else {
         Fluttertoast.showToast(
-            msg: "Server Error (${response.statusCode})");
+            msg: "Server Error (${response.statusCode})",
+            backgroundColor: Colors.red,
+            textColor: Colors.white,
+        );
       }
     } catch (e) {
       setState(() => _isLoading = false);
-      Fluttertoast.showToast(msg: "Network error: $e");
+      Fluttertoast.showToast(msg: "Network error: $e", 
+          backgroundColor: Colors.red,
+          textColor: Colors.white,
+      );
     }
   }
 
@@ -164,7 +177,7 @@ class _LoginPageState extends State<LoginPage> {
                               child: ElevatedButton(
                                 onPressed: login,
                                 style: ElevatedButton.styleFrom(
-                                  backgroundColor: Colors.blue,
+                                  backgroundColor: Colors.green,
                                   shape: RoundedRectangleBorder(
                                     borderRadius: BorderRadius.circular(10),
                                   ),
