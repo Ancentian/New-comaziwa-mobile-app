@@ -22,13 +22,15 @@ class FarmerAdapter extends TypeAdapter<Farmer> {
       lname: fields[2] as String,
       centerName: fields[3] as String,
       contact: fields[4] as String,
+      monthlyTotal: fields[5] as double,
+      yearlyTotal: fields[6] as double,
     );
   }
 
   @override
   void write(BinaryWriter writer, Farmer obj) {
     writer
-      ..writeByte(5)
+      ..writeByte(7)
       ..writeByte(0)
       ..write(obj.farmerId)
       ..writeByte(1)
@@ -38,7 +40,11 @@ class FarmerAdapter extends TypeAdapter<Farmer> {
       ..writeByte(3)
       ..write(obj.centerName)
       ..writeByte(4)
-      ..write(obj.contact);
+      ..write(obj.contact)
+      ..writeByte(5)
+      ..write(obj.monthlyTotal)
+      ..writeByte(6)
+      ..write(obj.yearlyTotal);
   }
 
   @override

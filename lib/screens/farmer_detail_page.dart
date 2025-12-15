@@ -7,6 +7,8 @@ import 'package:fluttertoast/fluttertoast.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:intl/intl.dart';
 import 'dart:async';
+import 'package:hive/hive.dart';
+import '../services/printer_service.dart';
 
 
 class FarmerDetailPage extends StatefulWidget {
@@ -50,14 +52,29 @@ class _FarmerDetailPageState extends State<FarmerDetailPage> {
     return prefs.getString('token');
   }
 
+  Future<int?> _getTenantId() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getInt('tenant_id');
+  }
+
   Future<void> fetchFarmerDetail() async {
     final token = await _getAuthToken();
     if (token == null) return;
+
+    final tenantId = await _getTenantId();
+    if (tenantId == null) {
+      Fluttertoast.showToast(
+        msg: "Missing tenant info. Please login again.",
+        backgroundColor: Colors.redAccent,
+      );
+      return;
+    }
 
     setState(() => isLoading = true);
 
     try {
       final queryParams = {
+        'tenant_id': tenantId.toString(),
         'start_date': DateFormat('yyyy-MM-dd').format(selectedRange!.start),
         'end_date': DateFormat('yyyy-MM-dd').format(selectedRange!.end),
       };
@@ -68,30 +85,111 @@ class _FarmerDetailPageState extends State<FarmerDetailPage> {
       final res = await http.get(
         uri,
         headers: {"Authorization": "Bearer $token"},
-      );
+      ).timeout(const Duration(seconds: 10));
+
+      List<dynamic> serverData = [];
+      Map<String, dynamic>? farmerData;
 
       if (res.statusCode == 200) {
         final data = json.decode(res.body);
-        final milkData = data['data']['milkCollection'] ?? [];
-
-        double sum = 0;
-        for (var m in milkData) {
-          sum += (m['total'] ?? 0).toDouble();
-        }
-
-        setState(() {
-          farmer = data['data']['farmer'];
-          milkCollection = milkData;
-          totalMilk = sum;
-          isLoading = false;
-        });
-      } else {
-        setState(() => isLoading = false);
-        Fluttertoast.showToast(msg: "Failed to load farmer details");
+        farmerData = data['data']['farmer'];
+        serverData = data['data']['milkCollection'] ?? [];
       }
+
+      // Merge with local unsynced data from Hive
+      final localData = await _getLocalCollections();
+      
+      // Combine server and local data
+      final allCollections = [...serverData, ...localData];
+      
+      // Remove duplicates and sort by date
+      final uniqueCollections = <String, dynamic>{};
+      for (var item in allCollections) {
+        final dateKey = item['date'];
+        if (!uniqueCollections.containsKey(dateKey)) {
+          uniqueCollections[dateKey] = item;
+        }
+      }
+      
+      final sortedCollections = uniqueCollections.values.toList()
+        ..sort((a, b) => a['date'].compareTo(b['date']));
+
+      // Calculate total milk
+      double sum = 0;
+      for (var m in sortedCollections) {
+        sum += (m['total'] ?? 0).toDouble();
+      }
+
+      setState(() {
+        farmer = farmerData;
+        milkCollection = sortedCollections;
+        totalMilk = sum;
+        isLoading = false;
+      });
     } catch (e) {
-      setState(() => isLoading = false);
-      Fluttertoast.showToast(msg: "Error: $e");
+      // If online fetch fails, try local data only
+      final localData = await _getLocalCollections();
+      
+      double sum = 0;
+      for (var m in localData) {
+        sum += (m['total'] ?? 0).toDouble();
+      }
+      
+      setState(() {
+        milkCollection = localData;
+        totalMilk = sum;
+        isLoading = false;
+      });
+      
+      Fluttertoast.showToast(
+        msg: "Using offline data",
+        backgroundColor: Colors.orange,
+      );
+    }
+  }
+
+  /// Get local unsynced collections for this farmer from Hive
+  Future<List<Map<String, dynamic>>> _getLocalCollections() async {
+    try {
+      final box = await Hive.openBox<dynamic>('milk_collections');
+      final collections = box.values
+          .where((item) {
+            // Filter by farmer ID and date range
+            final farmerId = item.farmerId ?? item['farmer_id'];
+            final collectionDate = item.date ?? item['collection_date'];
+            
+            if (farmerId != widget.farmerId) return false;
+            if (collectionDate == null) return false;
+            
+            try {
+              final date = DateTime.parse(collectionDate);
+              return date.isAfter(selectedRange!.start.subtract(const Duration(days: 1))) &&
+                     date.isBefore(selectedRange!.end.add(const Duration(days: 1)));
+            } catch (e) {
+              return false;
+            }
+          })
+          .map((item) {
+            final morning = (item.morning ?? item['morning'] ?? 0).toDouble();
+            final evening = (item.evening ?? item['evening'] ?? 0).toDouble();
+            final rejected = (item.rejected ?? item['rejected'] ?? 0).toDouble();
+            final total = morning + evening - rejected;
+            
+            return {
+              'date': item.date ?? item['collection_date'],
+              'morning': morning,
+              'evening': evening,
+              'rejected': rejected,
+              'total': total,
+              'is_local': true, // Flag to identify local data
+            };
+          })
+          .toList();
+      
+      return collections;
+    } catch (e) {
+      print('Error loading local collections: $e');
+      return [];
     }
   }
 
@@ -136,6 +234,11 @@ class _FarmerDetailPageState extends State<FarmerDetailPage> {
       appBar: AppBar(
         title: const Text("Farmer Details"),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.print),
+            tooltip: "Print Summary",
+            onPressed: _printSummary,
+          ),
           IconButton(
             icon: const Icon(Icons.filter_alt_rounded),
             tooltip: "Filter by Date",
@@ -335,10 +438,322 @@ milkCollection.isEmpty
           ),
         ),
       ),
+                      const SizedBox(height: 24),
 
+                      // -------- PRODUCTION STATISTICS --------
+                      Row(
+                        children: [
+                          Expanded(
+                            child: _buildStatCard(
+                              'Total Collections',
+                              milkCollection.length.toString(),
+                              Icons.event_note,
+                              Colors.blue,
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: _buildStatCard(
+                              'Average/Day',
+                              milkCollection.isEmpty
+                                  ? '0.0 L'
+                                  : '${(totalMilk / milkCollection.length).toStringAsFixed(1)} L',
+                              Icons.analytics,
+                              Colors.orange,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: _buildStatCard(
+                              'Highest Day',
+                              _getHighestDay(),
+                              Icons.trending_up,
+                              Colors.green,
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: _buildStatCard(
+                              'Lowest Day',
+                              _getLowestDay(),
+                              Icons.trending_down,
+                              Colors.red,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 24),
+
+                      // -------- DAILY BREAKDOWN TABLE --------
+                      Container(
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(16),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.grey.withOpacity(0.1),
+                              blurRadius: 10,
+                              offset: const Offset(0, 4),
+                            ),
+                          ],
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Padding(
+                              padding: const EdgeInsets.all(16),
+                              child: Row(
+                                children: [
+                                  Icon(Icons.list_alt, color: Colors.green.shade700),
+                                  const SizedBox(width: 8),
+                                  const Text(
+                                    'Daily Production Details',
+                                    style: TextStyle(
+                                      fontSize: 18,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const Divider(height: 1),
+                            ListView.separated(
+                              shrinkWrap: true,
+                              physics: const NeverScrollableScrollPhysics(),
+                              itemCount: milkCollection.length,
+                              separatorBuilder: (context, index) => const Divider(height: 1),
+                              itemBuilder: (context, index) {
+                                final item = milkCollection[index];
+                                final date = DateTime.parse(item['date']);
+                                final morning = (item['morning'] ?? 0).toDouble();
+                                final evening = (item['evening'] ?? 0).toDouble();
+                                final total = (item['total'] ?? 0).toDouble();
+
+                                return ListTile(
+                                  contentPadding: const EdgeInsets.symmetric(
+                                    horizontal: 16,
+                                    vertical: 8,
+                                  ),
+                                  leading: Container(
+                                    padding: const EdgeInsets.all(8),
+                                    decoration: BoxDecoration(
+                                      color: Colors.green.shade50,
+                                      borderRadius: BorderRadius.circular(8),
+                                    ),
+                                    child: Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Text(
+                                          DateFormat('dd').format(date),
+                                          style: TextStyle(
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 18,
+                                            color: Colors.green.shade700,
+                                          ),
+                                        ),
+                                        Text(
+                                          DateFormat('MMM').format(date),
+                                          style: TextStyle(
+                                            fontSize: 10,
+                                            color: Colors.green.shade600,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  title: Row(
+                                    children: [
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              DateFormat('EEEE').format(date),
+                                              style: const TextStyle(
+                                                fontWeight: FontWeight.w600,
+                                                fontSize: 14,
+                                              ),
+                                            ),
+                                            const SizedBox(height: 4),
+                                            Row(
+                                              children: [
+                                                Icon(Icons.wb_sunny_outlined,
+                                                    size: 14, color: Colors.orange.shade700),
+                                                const SizedBox(width: 4),
+                                                Text(
+                                                  '${morning.toStringAsFixed(1)}L',
+                                                  style: const TextStyle(fontSize: 12),
+                                                ),
+                                                const SizedBox(width: 12),
+                                                Icon(Icons.nightlight_outlined,
+                                                    size: 14, color: Colors.indigo.shade700),
+                                                const SizedBox(width: 4),
+                                                Text(
+                                                  '${evening.toStringAsFixed(1)}L',
+                                                  style: const TextStyle(fontSize: 12),
+                                                ),
+                                              ],
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 12,
+                                          vertical: 6,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          gradient: LinearGradient(
+                                            colors: [
+                                              Colors.green.shade600,
+                                              Colors.green.shade700,
+                                            ],
+                                          ),
+                                          borderRadius: BorderRadius.circular(12),
+                                        ),
+                                        child: Text(
+                                          '${total.toStringAsFixed(1)} L',
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 14,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                              },
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 20),
                     ],
                   ),
                 ),
     );
+  }
+
+  Widget _buildStatCard(String label, String value, IconData icon, Color color) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [color.withOpacity(0.8), color],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+            color: color.withOpacity(0.3),
+            blurRadius: 8,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, color: Colors.white, size: 28),
+          const SizedBox(height: 8),
+          Text(
+            label,
+            style: TextStyle(
+              color: Colors.white.withOpacity(0.9),
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            value,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 18,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _getHighestDay() {
+    if (milkCollection.isEmpty) return '0.0 L';
+    var highest = milkCollection.reduce((a, b) =>
+        ((a['total'] ?? 0) > (b['total'] ?? 0)) ? a : b);
+    return '${(highest['total'] ?? 0).toStringAsFixed(1)} L';
+  }
+
+  String _getLowestDay() {
+    if (milkCollection.isEmpty) return '0.0 L';
+    var lowest = milkCollection.reduce((a, b) =>
+        ((a['total'] ?? 0) < (b['total'] ?? 0)) ? a : b);
+    return '${(lowest['total'] ?? 0).toStringAsFixed(1)} L';
+  }
+
+  Future<void> _printSummary() async {
+    if (farmer == null || milkCollection.isEmpty) {
+      Fluttertoast.showToast(msg: "No data to print");
+      return;
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    final companyName = prefs.getString('company_name') ?? 'Dairy Cooperative';
+    
+    // Check Bluetooth connection
+    final canPrint = await PrinterService.checkBluetoothConnection(context);
+    if (!canPrint) return;
+
+    try {
+      final receiptData = {
+        'title': 'FARMER PRODUCTION SUMMARY',
+        'company_name': companyName,
+        'farmer_name': '${farmer!['fname']} ${farmer!['lname']}',
+        'farmer_id': farmer!['farmerID'].toString(),
+        'contact': farmer!['contact1'] ?? 'N/A',
+        'center': farmer!['center']?['center_name'] ?? 'N/A',
+        'period': '${DateFormat('dd/MM/yyyy').format(selectedRange!.start)} - ${DateFormat('dd/MM/yyyy').format(selectedRange!.end)}',
+        'total_collections': milkCollection.length.toString(),
+        'total_milk': totalMilk.toStringAsFixed(2),
+        'average_per_day': (totalMilk / milkCollection.length).toStringAsFixed(2),
+        'highest_day': _getHighestDay(),
+        'lowest_day': _getLowestDay(),
+        'collections': milkCollection.take(10).map((item) => {
+          'date': DateFormat('dd/MM/yyyy').format(DateTime.parse(item['date'])),
+          'morning': (item['morning'] ?? 0).toStringAsFixed(1),
+          'evening': (item['evening'] ?? 0).toStringAsFixed(1),
+          'total': (item['total'] ?? 0).toStringAsFixed(1),
+        }).toList(),
+      };
+
+      final success = await PrinterService.printReceiptWidget(
+        ReceiptBuilder.farmerSummary(receiptData),
+        context,
+      );
+
+      if (success) {
+        Fluttertoast.showToast(
+          msg: "Summary printed successfully",
+          backgroundColor: Colors.green,
+        );
+      } else {
+        Fluttertoast.showToast(
+          msg: "Print cancelled or failed",
+          backgroundColor: Colors.orange,
+        );
+      }
+    } catch (e) {
+      Fluttertoast.showToast(
+        msg: "Print failed: $e",
+        backgroundColor: Colors.red,
+      );
+    }
   }
 }

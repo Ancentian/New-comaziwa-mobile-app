@@ -2,6 +2,7 @@
 
 class AppConfig {
   static const bool isLocal = true;
+  static const bool enableAutoPrint = false; // Set to true to enable auto-print on app start
 
   static String get baseUrl {
     if (isLocal) {

@@ -1,10 +1,14 @@
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:fluttertoast/fluttertoast.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:package_info_plus/package_info_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../config/app_config.dart';
 import '../services/farmer_service.dart';
+import '../utils/http_retry_helper.dart';
+import '../utils/error_logger.dart';
+import 'error_logs_page.dart';
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
@@ -17,6 +21,40 @@ class _LoginPageState extends State<LoginPage> {
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
   bool _isLoading = false;
+  bool _obscurePassword = true;
+  String _appVersion = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _loadAppVersion();
+  }
+
+  Future<void> _loadAppVersion() async {
+    try {
+      final info = await PackageInfo.fromPlatform();
+      setState(() => _appVersion = info.version);
+    } catch (e) {
+      print('Failed to load package info: $e');
+    }
+  }
+
+  Future<void> _openTerms() async {
+    final uri = Uri.parse('${AppConfig.baseUrl}/terms');
+    try {
+      if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+        Fluttertoast.showToast(
+          msg: 'Could not open Terms & Conditions',
+          backgroundColor: Colors.red,
+        );
+      }
+    } catch (e) {
+      Fluttertoast.showToast(
+        msg: 'Error opening link: $e',
+        backgroundColor: Colors.red,
+      );
+    }
+  }
 
   /// ------------------------------------
   /// LOGIN FUNCTION
@@ -35,66 +73,164 @@ class _LoginPageState extends State<LoginPage> {
     final url = Uri.parse("${AppConfig.baseUrl}/api/auth/login");
 
     try {
-      final response = await http.post(url, body: {
-        'email': email,
-        'password': password,
-      });
+      final response = await HttpRetryHelper.post(
+        url: url,
+        isJson: true,
+        body: jsonEncode({'email': email, 'password': password}),
+      );
 
       setState(() => _isLoading = false);
 
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
+      // If the server returns non-200, show server error with status
+      if (response.statusCode != 200) {
+        // Log to file for support
+        await ErrorLogger.logNetworkError(
+          endpoint: url.toString(),
+          statusCode: response.statusCode,
+          contentType: response.headers['content-type'],
+          rawBody: response.body,
+          errorMessage: 'Login failed with status ${response.statusCode}',
+          headers: response.headers,
+        );
 
-        if (data['status'] == 'success') {
-          // Save token
-          final prefs = await SharedPreferences.getInstance();
-          await prefs.setString('token', data['token']);
-          await prefs.setString('user_email', email);
+        Fluttertoast.showToast(
+          msg: "Server Error (${response.statusCode})",
+          backgroundColor: Colors.red,
+          textColor: Colors.white,
+        );
+        return;
+      }
 
-          Fluttertoast.showToast(
-            msg: "Login successful", 
-            backgroundColor: Colors.green,
-            textColor: Colors.white,
-          );
+      // At this point statusCode == 200. Ensure the response is JSON.
+      final contentType = response.headers['content-type'] ?? '';
+      if (!contentType.toLowerCase().contains('application/json')) {
+        // Server returned HTML or plain text (often an error page). Log and show message.
+        print('EXPECTED JSON BUT GOT: $contentType');
+        print('RAW BODY: ${response.body}');
 
-          // -----------------------------
-          // 🔥 STEP 1: SYNC FARMERS
-          // -----------------------------
-          Fluttertoast.showToast(msg: "Syncing farmers...");
+        // Log to file for support
+        await ErrorLogger.logNetworkError(
+          endpoint: url.toString(),
+          statusCode: response.statusCode,
+          contentType: contentType,
+          rawBody: response.body,
+          errorMessage:
+              'Received non-JSON response (expected application/json)',
+          headers: response.headers,
+        );
 
-          // await FarmerService().fetchAllFarmers();
-          bool downloaded = await FarmerService().downloadFarmers();
-          if (!downloaded) {
-            Fluttertoast.showToast(
-              msg: "Please go online to fetch farmers first",
-              backgroundColor: Colors.orange,
-              textColor: Colors.white,
-            );
+        Fluttertoast.showToast(
+          msg: "Unexpected response from server (not JSON). Check server logs.",
+          backgroundColor: Colors.red,
+          textColor: Colors.white,
+        );
+        return;
+      }
+
+      Map<String, dynamic> data;
+      try {
+        data = json.decode(response.body);
+      } on FormatException catch (fe) {
+        // This happens when response starts with '<' (HTML) or otherwise invalid JSON
+        print('JSON PARSE ERROR: $fe');
+        print('RAW BODY: ${response.body}');
+
+        // Log to file for support
+        await ErrorLogger.logNetworkError(
+          endpoint: url.toString(),
+          statusCode: response.statusCode,
+          contentType: contentType,
+          rawBody: response.body,
+          errorMessage: 'JSON parse error: $fe',
+          headers: response.headers,
+        );
+
+        Fluttertoast.showToast(
+          msg: "Received invalid JSON from server.",
+          backgroundColor: Colors.red,
+          textColor: Colors.white,
+        );
+        return;
+      }
+
+      if (data['status'] == 'success') {
+        final prefs = await SharedPreferences.getInstance();
+
+        // -----------------------------
+        // 🔥 SAVE TOKEN
+        // -----------------------------
+        await prefs.setString('token', data['token']);
+        await prefs.setString('user_email', email);
+
+        // -----------------------------
+        // 🔥 SAVE USER TYPE (user / employee) & ID
+        // -----------------------------
+        if (data['user'] != null) {
+          final type = data['user']['role'] ?? data['user']['type'] ?? 'user';
+          await prefs.setString('type', type);
+
+          // Save user/employee ID
+          if (data['user']['id'] != null) {
+            await prefs.setInt('user_id', data['user']['id']);
           }
 
-          // -----------------------------
-          // 🔥 STEP 2: GO TO DASHBOARD
-          // -----------------------------
-          Navigator.pushReplacementNamed(context, '/dashboard');
-
-        } else {
-          Fluttertoast.showToast(msg: data['message'] ?? "Login failed", 
-              backgroundColor: Colors.red,
-              textColor: Colors.white,
-          );
+          // Save user name
+          if (data['user']['name'] != null) {
+            await prefs.setString('name', data['user']['name']);
+          }
         }
+
+        // -----------------------------
+        // 🔥 SAVE TENANT ID
+        // -----------------------------
+        if (data['user'] != null && data['user']['tenant_id'] != null) {
+          await prefs.setInt('tenant_id', data['user']['tenant_id']);
+        }
+
+        // -----------------------------
+        // 🔥 SAVE COMPANY INFO
+        // -----------------------------
+        if (data['company'] != null) {
+          if (data['company']['name'] != null) {
+            await prefs.setString('company_name', data['company']['name']);
+          }
+          if (data['company']['email'] != null) {
+            await prefs.setString('company_email', data['company']['email']);
+          }
+        }
+
+        Fluttertoast.showToast(
+          msg: "Login successful",
+          backgroundColor: Colors.green,
+          textColor: Colors.white,
+        );
+
+        // -----------------------------
+        // 🔥 GO TO DASHBOARD
+        // -----------------------------
+        // Sync happens in dashboard initState
+        Navigator.pushReplacementNamed(context, '/dashboard');
       } else {
         Fluttertoast.showToast(
-            msg: "Server Error (${response.statusCode})",
-            backgroundColor: Colors.red,
-            textColor: Colors.white,
+          msg: data['message'] ?? "Login failed",
+          backgroundColor: Colors.red,
+          textColor: Colors.white,
         );
       }
     } catch (e) {
       setState(() => _isLoading = false);
-      Fluttertoast.showToast(msg: "Network error: $e", 
-          backgroundColor: Colors.red,
-          textColor: Colors.white,
+      print('LOGIN EXCEPTION: $e');
+
+      // Log exception to file
+      await ErrorLogger.logError(
+        message: 'Login exception: $e',
+        stackTrace: StackTrace.current.toString(),
+      );
+
+      Fluttertoast.showToast(
+        msg: "Network error: $e",
+        backgroundColor: Colors.red,
+        textColor: Colors.white,
       );
     }
   }
@@ -126,7 +262,9 @@ class _LoginPageState extends State<LoginPage> {
                 ),
                 child: Padding(
                   padding: const EdgeInsets.symmetric(
-                      horizontal: 24, vertical: 32),
+                    horizontal: 24,
+                    vertical: 32,
+                  ),
                   child: Column(
                     children: [
                       const Text(
@@ -158,13 +296,25 @@ class _LoginPageState extends State<LoginPage> {
 
                       TextField(
                         controller: _passwordController,
-                        obscureText: true,
+                        obscureText: _obscurePassword,
                         decoration: InputDecoration(
                           labelText: "Password",
                           border: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(10),
                           ),
                           prefixIcon: const Icon(Icons.lock_outline),
+                          suffixIcon: IconButton(
+                            icon: Icon(
+                              _obscurePassword
+                                  ? Icons.visibility
+                                  : Icons.visibility_off,
+                            ),
+                            onPressed: () {
+                              setState(() {
+                                _obscurePassword = !_obscurePassword;
+                              });
+                            },
+                          ),
                         ),
                       ),
                       const SizedBox(height: 24),
@@ -194,6 +344,51 @@ class _LoginPageState extends State<LoginPage> {
                             ),
                     ],
                   ),
+                ),
+              ),
+
+              // Terms, Version and View Logs Links
+              Padding(
+                padding: const EdgeInsets.only(top: 16),
+                child: Column(
+                  children: [
+                    GestureDetector(
+                      onTap: _openTerms,
+                      child: Text(
+                        'Terms & Conditions',
+                        style: TextStyle(
+                          color: Colors.blue.shade700,
+                          fontSize: 13,
+                          decoration: TextDecoration.underline,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    if (_appVersion.isNotEmpty)
+                      Text(
+                        'v${_appVersion.split('.').take(2).join('.')}',
+                        style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                      ),
+                    const SizedBox(height: 8),
+                    GestureDetector(
+                      onTap: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (context) => const ErrorLogsPage(),
+                          ),
+                        );
+                      },
+                      child: Text(
+                        'View Error Logs',
+                        style: TextStyle(
+                          color: Colors.grey[600],
+                          fontSize: 12,
+                          decoration: TextDecoration.underline,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ],
