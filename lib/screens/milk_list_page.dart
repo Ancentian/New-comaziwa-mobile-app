@@ -5,8 +5,11 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:intl/intl.dart';
 import 'package:hive/hive.dart';
+
 import '../config/app_config.dart';
 import '../models/milk_collection.dart';
+import '../services/printer_service.dart';
+import '../services/sync_service.dart';
 
 class MilkListPage extends StatefulWidget {
   const MilkListPage({super.key});
@@ -23,10 +26,10 @@ class _MilkListPageState extends State<MilkListPage>
   bool hasError = false;
   late String apiBase;
 
-  // filters
   String searchQuery = '';
   DateTime? startDate;
   DateTime? endDate;
+  Map<String, String> printStatus = {}; // Track print status per item ID
 
   late AnimationController _controller;
   late Animation<double> _animation;
@@ -35,15 +38,36 @@ class _MilkListPageState extends State<MilkListPage>
   void initState() {
     super.initState();
     apiBase = "${AppConfig.baseUrl}/api";
-    _controller =
-        AnimationController(vsync: this, duration: const Duration(milliseconds: 800));
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 800),
+    );
     _animation = CurvedAnimation(parent: _controller, curve: Curves.easeInOut);
 
     DateTime now = DateTime.now();
     startDate = DateTime(now.year, now.month, 1);
     endDate = DateTime(now.year, now.month + 1, 0);
 
+    // Load from Hive (already synced on dashboard load)
     fetchMilkList();
+  }
+
+  /// Refresh data: sync from server then reload from Hive
+  Future<void> _refreshData() async {
+    Fluttertoast.showToast(
+      msg: "Syncing from server...",
+      backgroundColor: Colors.blue,
+      toastLength: Toast.LENGTH_SHORT,
+    );
+
+    await SyncService().downloadMilkCollections();
+    await fetchMilkList();
+
+    Fluttertoast.showToast(
+      msg: "Data refreshed",
+      backgroundColor: Colors.green,
+      toastLength: Toast.LENGTH_SHORT,
+    );
   }
 
   Future<String?> _getAuthToken() async {
@@ -51,7 +75,7 @@ class _MilkListPageState extends State<MilkListPage>
     return prefs.getString('token');
   }
 
-  /// Fetch both online and offline milk records
+  /// Fetch milk records from Hive (includes both locally created and synced from server)
   Future<void> fetchMilkList() async {
     setState(() {
       isLoading = true;
@@ -60,16 +84,21 @@ class _MilkListPageState extends State<MilkListPage>
 
     List<Map<String, dynamic>> combinedList = [];
 
-    // 1️⃣ Load offline Hive records
+    // Load all records from Hive (includes locally created + synced from server)
     final box = Hive.box<MilkCollection>('milk_collections');
-    final offlineList = box.values.map((e) {
+
+    print("📊 Loading ${box.length} records from Hive");
+
+    final allRecords = box.values.map((e) {
       return {
+        'id': e.serverId != null ? 'server_${e.serverId}' : 'local_${e.key}',
+        'server_id': e.serverId, // Track server ID
         'farmerID': e.farmerId,
         'collection_date': e.date,
         'morning': e.morning,
         'evening': e.evening,
         'rejected': e.rejected,
-        'total': e.morning + e.evening,
+        'total': e.morning + e.evening - e.rejected,
         'center_name': e.center_name ?? 'N/A',
         'is_synced': e.isSynced,
         'hiveKey': e.key,
@@ -77,34 +106,10 @@ class _MilkListPageState extends State<MilkListPage>
         'lname': e.lname ?? '',
       };
     }).toList();
-    combinedList.addAll(offlineList);
 
-    // 2️⃣ Load online records
-    try {
-      final token = await _getAuthToken();
-      if (token != null) {
-        final response = await http.get(
-          Uri.parse("$apiBase/all_milk_collection"),
-          headers: {
-            'Accept': 'application/json',
-            'Authorization': 'Bearer $token',
-          },
-        );
+    combinedList.addAll(allRecords);
 
-        if (response.statusCode == 200) {
-          final data = json.decode(response.body);
-          final onlineList = data is List ? data : data['data'] ?? [];
-          onlineList.forEach((item) => item['is_synced'] = true);
-          combinedList.addAll(onlineList);
-        }
-      }
-    } catch (_) {
-      Fluttertoast.showToast(
-        msg: "Offline mode only",
-        backgroundColor: Colors.orange,
-        textColor: Colors.white,
-      );
-    }
+    print("✅ Loaded ${combinedList.length} total records (synced + local)");
 
     milkList = combinedList;
     _applyFilters();
@@ -115,17 +120,31 @@ class _MilkListPageState extends State<MilkListPage>
   void _applyFilters() {
     setState(() {
       filteredList = milkList.where((item) {
-        final nameMatch =
-            "${item['fname'] ?? ''} ${item['lname'] ?? ''}".toLowerCase().contains(searchQuery.toLowerCase());
-        final idMatch =
-            (item['farmerID'] ?? '').toString().toLowerCase().contains(searchQuery.toLowerCase());
+        final nameMatch = "${item['fname'] ?? ''} ${item['lname'] ?? ''}"
+            .toLowerCase()
+            .contains(searchQuery.toLowerCase());
+        final idMatch = (item['farmerID'] ?? '')
+            .toString()
+            .toLowerCase()
+            .contains(searchQuery.toLowerCase());
 
         final date = DateTime.tryParse(item['collection_date'] ?? '');
-        final dateMatch = (startDate == null || (date != null && !date.isBefore(startDate!))) &&
+        final dateMatch =
+            (startDate == null ||
+                (date != null && !date.isBefore(startDate!))) &&
             (endDate == null || (date != null && !date.isAfter(endDate!)));
 
         return (nameMatch || idMatch) && dateMatch;
       }).toList();
+
+      // Sort by date - latest first
+      filteredList.sort((a, b) {
+        final dateA =
+            DateTime.tryParse(a['collection_date'] ?? '') ?? DateTime(1970);
+        final dateB =
+            DateTime.tryParse(b['collection_date'] ?? '') ?? DateTime(1970);
+        return dateB.compareTo(dateA); // Descending order (latest first)
+      });
     });
   }
 
@@ -195,12 +214,16 @@ class _MilkListPageState extends State<MilkListPage>
     }
   }
 
-  /// Count of unsynced records
   int getUnsyncedCount() {
     return milkList.where((item) => item['is_synced'] == false).length;
   }
 
-  Widget _buildStatCard(String title, String value, IconData icon, Color color) {
+  Widget _buildStatCard(
+    String title,
+    String value,
+    IconData icon,
+    Color color,
+  ) {
     return FadeTransition(
       opacity: _animation,
       child: AnimatedContainer(
@@ -234,21 +257,207 @@ class _MilkListPageState extends State<MilkListPage>
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(title,
-                    style: const TextStyle(
-                        color: Colors.white, fontWeight: FontWeight.bold)),
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
                 const SizedBox(height: 4),
-                Text(value,
-                    style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 22,
-                        fontWeight: FontWeight.bold)),
+                Text(
+                  value,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 22,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
               ],
-            )
+            ),
           ],
         ),
       ),
     );
+  }
+
+  /// Printing method with auto-print support
+  /// When auto-print is enabled, it uses the default printer automatically
+  /// When disabled, user is prompted to select a printer
+  Widget _buildPrintButton(Map<String, dynamic> item) {
+    final itemId = item['id'].toString();
+    final status = printStatus[itemId];
+
+    if (status == 'printing') {
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        child: Center(
+          child: SizedBox(
+            width: 24,
+            height: 24,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              valueColor: AlwaysStoppedAnimation<Color>(Colors.blue[700]!),
+            ),
+          ),
+        ),
+      );
+    }
+
+    if (status == 'success') {
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        child: Icon(Icons.check_circle, color: Colors.green[700], size: 24),
+      );
+    }
+
+    if (status == 'error') {
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        child: InkWell(
+          onTap: () => _printReceipt(item),
+          child: Icon(Icons.error_outline, color: Colors.red[700], size: 24),
+        ),
+      );
+    }
+
+    return IconButton(
+      icon: const Icon(Icons.print, color: Colors.blue),
+      onPressed: () => _printReceipt(item),
+    );
+  }
+
+  Future<void> _printReceipt(Map<String, dynamic> item) async {
+    final itemId = item['id'].toString();
+
+    try {
+      // Set status to printing
+      setState(() {
+        printStatus[itemId] = 'printing';
+      });
+
+      // Get farmer totals from server + add only unsynced local collections
+      print("📊 Fetching totals from server...");
+
+      final farmerId = item['farmerID'];
+      final prefs = await SharedPreferences.getInstance();
+      final companyName = prefs.getString('company_name');
+      final token = await _getAuthToken();
+      final tenantId = prefs.getInt('tenant_id');
+
+      final today = DateTime.now();
+      final todayStr = DateFormat('yyyy-MM-dd').format(today);
+      final currentYear = today.year;
+      final currentMonth = today.month;
+
+      double todayTotal = 0;
+      double monthlyTotal = 0;
+      double yearlyTotal = 0;
+
+      // Fetch server totals
+      if (token != null && tenantId != null) {
+        try {
+          final res = await http.get(
+            Uri.parse("$apiBase/find-farmer/$farmerId?tenant_id=$tenantId"),
+            headers: {"Authorization": "Bearer $token"},
+          );
+
+          if (res.statusCode == 200) {
+            final data = json.decode(res.body);
+            todayTotal = (data['todays_total'] ?? 0).toDouble();
+            monthlyTotal = (data['monthly_total'] ?? 0).toDouble();
+            yearlyTotal = (data['yearly_total'] ?? 0).toDouble();
+          }
+        } catch (e) {
+          print("⚠️ Could not fetch from API: $e");
+        }
+      }
+
+      // Add only unsynced (offline) collections to server totals
+      final box = Hive.box<MilkCollection>('milk_collections');
+      for (var record in box.values) {
+        if (record.farmerId == farmerId && !record.isSynced) {
+          final recordDate = DateTime.tryParse(record.date);
+          if (recordDate != null && recordDate.year == currentYear) {
+            final recordTotal =
+                record.morning + record.evening - record.rejected;
+
+            // Today's additions
+            if (DateFormat('yyyy-MM-dd').format(recordDate) == todayStr) {
+              todayTotal += recordTotal;
+            }
+
+            // Monthly additions
+            if (recordDate.month == currentMonth) {
+              monthlyTotal += recordTotal;
+            }
+
+            // Yearly additions
+            yearlyTotal += recordTotal;
+          }
+        }
+      }
+
+      print(
+        "✅ Totals: Today=$todayTotal, Monthly=$monthlyTotal, Yearly=$yearlyTotal",
+      );
+
+      // Add totals to item data
+      final enrichedItem = Map<String, dynamic>.from(item);
+      enrichedItem['today_total'] = todayTotal.toStringAsFixed(2);
+      enrichedItem['monthly_total'] = monthlyTotal.toStringAsFixed(2);
+      enrichedItem['yearly_total'] = yearlyTotal.toStringAsFixed(2);
+      enrichedItem['company_name'] = companyName;
+
+      final receiptWidget = ReceiptBuilder.milkReceipt(enrichedItem);
+      final ok = await PrinterService.printWithRetry(
+        receiptWidget,
+        context,
+        retries: 2,
+      );
+      if (!ok) throw Exception('Print failed');
+
+      // Set status to success
+      setState(() {
+        printStatus[itemId] = 'success';
+      });
+
+      Fluttertoast.showToast(
+        msg: "Printed successfully",
+        backgroundColor: Colors.green,
+        toastLength: Toast.LENGTH_SHORT,
+      );
+
+      // Clear status after 2 seconds
+      Future.delayed(const Duration(seconds: 2), () {
+        if (mounted) {
+          setState(() {
+            printStatus.remove(itemId);
+          });
+        }
+      });
+    } catch (e) {
+      // Set status to error
+      setState(() {
+        printStatus[itemId] = 'error';
+      });
+
+      Fluttertoast.showToast(
+        msg: "Print failed: $e",
+        backgroundColor: Colors.red,
+        textColor: Colors.white,
+        toastLength: Toast.LENGTH_LONG,
+      );
+
+      // Clear status after 3 seconds
+      Future.delayed(const Duration(seconds: 3), () {
+        if (mounted) {
+          setState(() {
+            printStatus.remove(itemId);
+          });
+        }
+      });
+    }
   }
 
   @override
@@ -266,7 +475,6 @@ class _MilkListPageState extends State<MilkListPage>
         backgroundColor: Colors.green,
         elevation: 0,
         actions: [
-          // Sync All button + badge
           Stack(
             alignment: Alignment.center,
             children: [
@@ -276,8 +484,9 @@ class _MilkListPageState extends State<MilkListPage>
                 onPressed: getUnsyncedCount() == 0
                     ? null
                     : () async {
-                        final unsynced =
-                            milkList.where((item) => item['is_synced'] == false);
+                        final unsynced = milkList.where(
+                          (item) => item['is_synced'] == false,
+                        );
                         bool allSuccess = true;
 
                         for (var item in unsynced) {
@@ -285,13 +494,18 @@ class _MilkListPageState extends State<MilkListPage>
                           if (hiveKey != null) {
                             bool success = await syncSingleCollection(hiveKey);
                             if (!success) allSuccess = false;
-                            if (success) setState(() => item['is_synced'] = true);
+                            if (success)
+                              setState(() => item['is_synced'] = true);
                           }
                         }
 
                         Fluttertoast.showToast(
-                          msg: allSuccess ? "All collections synced" : "Some collections failed",
-                          backgroundColor: allSuccess ? Colors.green : Colors.red,
+                          msg: allSuccess
+                              ? "All collections synced"
+                              : "Some collections failed",
+                          backgroundColor: allSuccess
+                              ? Colors.green
+                              : Colors.red,
                         );
                       },
               ),
@@ -331,167 +545,199 @@ class _MilkListPageState extends State<MilkListPage>
             ],
           ),
           IconButton(
-            onPressed: fetchMilkList,
+            onPressed: _refreshData,
             icon: const Icon(Icons.refresh),
-            tooltip: 'Refresh',
+            tooltip: 'Sync & Refresh',
           ),
         ],
       ),
       body: RefreshIndicator(
-        onRefresh: fetchMilkList,
+        onRefresh: _refreshData,
         child: isLoading
-            ? const Center(child: CircularProgressIndicator(color: Colors.green))
+            ? const Center(
+                child: CircularProgressIndicator(color: Colors.green),
+              )
             : hasError
-                ? const Center(
-                    child: Text(
-                      "Failed to load milk list. Please try again.",
-                      style: TextStyle(color: Colors.redAccent),
+            ? const Center(
+                child: Text(
+                  "Failed to load milk list. Please try again.",
+                  style: TextStyle(color: Colors.redAccent),
+                ),
+              )
+            : Column(
+                children: [
+                  // Search + Filter Row
+                  Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 8,
                     ),
-                  )
-                : Column(
-                    children: [
-                      // Search + Filter Row
-                      Padding(
-                        padding:
-                            const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: TextField(
-                                decoration: InputDecoration(
-                                  hintText: 'Search by Farmer ID or Name',
-                                  prefixIcon: const Icon(Icons.search),
-                                  filled: true,
-                                  fillColor: Colors.white,
-                                  contentPadding: const EdgeInsets.symmetric(vertical: 4),
-                                  border: OutlineInputBorder(
-                                    borderRadius: BorderRadius.circular(12),
-                                    borderSide: BorderSide.none,
-                                  ),
-                                ),
-                                onChanged: (value) {
-                                  setState(() => searchQuery = value);
-                                  _applyFilters();
-                                },
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            decoration: InputDecoration(
+                              hintText: 'Search by Farmer ID or Name',
+                              prefixIcon: const Icon(Icons.search),
+                              filled: true,
+                              fillColor: Colors.white,
+                              contentPadding: const EdgeInsets.symmetric(
+                                vertical: 4,
+                              ),
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                borderSide: BorderSide.none,
                               ),
                             ),
-                            const SizedBox(width: 8),
-                            TextButton.icon(
-                              style: TextButton.styleFrom(
-                                  backgroundColor: Colors.green.shade50),
-                              onPressed: _selectDateRange,
-                              icon: const Icon(Icons.filter_alt_rounded,
-                                  color: Colors.green),
-                              label: Text(
-                                rangeText,
-                                style: const TextStyle(color: Colors.green),
-                              ),
-                            ),
-                          ],
+                            onChanged: (value) {
+                              setState(() => searchQuery = value);
+                              _applyFilters();
+                            },
+                          ),
                         ),
-                      ),
-                      // Total Milk Card
-                      _buildStatCard(
-                        "Total Milk Collected",
-                        "$totalLitres L",
-                        Icons.local_drink,
-                        Colors.green,
-                      ),
-                      // Milk List
-                      Expanded(
-                        child: filteredList.isEmpty
-                            ? const Center(
-                                child: Text("No milk records found."),
-                              )
-                            : ListView.builder(
-                                padding: const EdgeInsets.all(12),
-                                itemCount: filteredList.length,
-                                itemBuilder: (context, index) {
-                                  final item = filteredList[index];
-                                  return AnimatedContainer(
-                                    duration: const Duration(milliseconds: 300),
-                                    curve: Curves.easeInOut,
-                                    margin: const EdgeInsets.only(bottom: 10),
-                                    decoration: BoxDecoration(
-                                      color: Colors.white,
-                                      borderRadius: BorderRadius.circular(16),
-                                      boxShadow: [
-                                        BoxShadow(
-                                          color: Colors.grey.withOpacity(0.2),
-                                          blurRadius: 6,
-                                          offset: const Offset(0, 3),
-                                        ),
-                                      ],
+                        const SizedBox(width: 8),
+                        TextButton.icon(
+                          style: TextButton.styleFrom(
+                            backgroundColor: Colors.green.shade50,
+                          ),
+                          onPressed: _selectDateRange,
+                          icon: const Icon(
+                            Icons.filter_alt_rounded,
+                            color: Colors.green,
+                          ),
+                          label: Text(
+                            rangeText,
+                            style: const TextStyle(color: Colors.green),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  _buildStatCard(
+                    "Total Milk Collected",
+                    "$totalLitres L",
+                    Icons.local_drink,
+                    Colors.green,
+                  ),
+                  Expanded(
+                    child: filteredList.isEmpty
+                        ? const Center(child: Text("No milk records found."))
+                        : ListView.builder(
+                            padding: const EdgeInsets.all(12),
+                            itemCount: filteredList.length,
+                            itemBuilder: (context, index) {
+                              final item = filteredList[index];
+                              return AnimatedContainer(
+                                duration: const Duration(milliseconds: 300),
+                                curve: Curves.easeInOut,
+                                margin: const EdgeInsets.only(bottom: 10),
+                                decoration: BoxDecoration(
+                                  color: Colors.white,
+                                  borderRadius: BorderRadius.circular(16),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: Colors.grey.withOpacity(0.2),
+                                      blurRadius: 6,
+                                      offset: const Offset(0, 3),
                                     ),
-                                    child: ListTile(
-                                      leading: CircleAvatar(
-                                        radius: 24,
-                                        backgroundColor: Colors.green.shade100,
-                                        child: const Icon(Icons.local_drink,
-                                            color: Colors.green),
-                                      ),
-                                      title: Text(
-                                        "${item['farmerID']} - ${item['fname']} ${item['lname']}",
+                                  ],
+                                ),
+                                child: ListTile(
+                                  leading: CircleAvatar(
+                                    radius: 24,
+                                    backgroundColor: Colors.green.shade100,
+                                    child: const Icon(
+                                      Icons.local_drink,
+                                      color: Colors.green,
+                                    ),
+                                  ),
+                                  title: Text(
+                                    "${item['farmerID']} - ${item['fname']} ${item['lname']}",
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 16,
+                                    ),
+                                  ),
+                                  subtitle: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        "Date: ${item['collection_date'] ?? 'N/A'}",
                                         style: const TextStyle(
-                                            fontWeight: FontWeight.bold, fontSize: 16),
+                                          fontSize: 14,
+                                          color: Colors.grey,
+                                        ),
                                       ),
-                                      subtitle: Column(
-                                        crossAxisAlignment: CrossAxisAlignment.start,
-                                        children: [
-                                          const SizedBox(height: 4),
-                                          Text(
-                                              "Date: ${item['collection_date'] ?? 'N/A'}",
-                                              style: const TextStyle(
-                                                  fontSize: 14, color: Colors.grey)),
-                                          Text(
-                                              "Center: ${item['center_name'] ?? 'N/A'}",
-                                              style: const TextStyle(
-                                                  fontSize: 14, color: Colors.grey)),
-                                          Text(
-                                            "Total: ${item['total'] ?? 0} L",
-                                            style: const TextStyle(
-                                              fontSize: 15,
+                                      Text(
+                                        "Center: ${item['center_name'] ?? 'N/A'}",
+                                        style: const TextStyle(
+                                          fontSize: 14,
+                                          color: Colors.grey,
+                                        ),
+                                      ),
+                                      Text(
+                                        "Total: ${item['total'] ?? 0} L",
+                                        style: const TextStyle(
+                                          fontSize: 15,
+                                          color: Colors.green,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  trailing: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      item['is_synced'] == true
+                                          ? const Icon(
+                                              Icons.check_circle,
                                               color: Colors.green,
-                                              fontWeight: FontWeight.w600,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                      trailing: item['is_synced'] == true
-                                          ? const Icon(Icons.check_circle,
-                                              color: Colors.green)
+                                            )
                                           : IconButton(
-                                              icon: const Icon(Icons.sync,
-                                                  color: Colors.orange),
+                                              icon: const Icon(
+                                                Icons.sync,
+                                                color: Colors.orange,
+                                              ),
                                               onPressed: () async {
                                                 final hiveKey = item['hiveKey'];
                                                 if (hiveKey != null) {
                                                   bool success =
                                                       await syncSingleCollection(
-                                                          hiveKey);
+                                                        hiveKey,
+                                                      );
                                                   if (success) {
                                                     setState(
-                                                        () => item['is_synced'] = true);
+                                                      () => item['is_synced'] =
+                                                          true,
+                                                    );
                                                     Fluttertoast.showToast(
-                                                      msg: "Synced successfully",
-                                                      backgroundColor: Colors.green,
+                                                      msg:
+                                                          "Synced successfully",
+                                                      backgroundColor:
+                                                          Colors.green,
                                                     );
                                                   } else {
                                                     Fluttertoast.showToast(
                                                       msg: "Sync failed",
-                                                      backgroundColor: Colors.red,
+                                                      backgroundColor:
+                                                          Colors.red,
                                                     );
                                                   }
                                                 }
                                               },
                                             ),
-                                    ),
-                                  );
-                                },
-                              ),
-                      ),
-                    ],
+                                      _buildPrintButton(item),
+                                    ],
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
                   ),
+                ],
+              ),
       ),
     );
   }

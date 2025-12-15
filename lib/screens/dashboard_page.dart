@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -13,11 +14,13 @@ import '../config/app_config.dart';
 import '../models/farmer.dart';
 import '../models/milk_collection.dart';
 import '../services/sync_service.dart';
+import '../services/farmer_service.dart';
 import 'login_page.dart';
+import 'profile_page.dart';
+import 'printer_settings_page.dart';
 
 class DashboardPage extends StatefulWidget {
   final String name;
-
   const DashboardPage({super.key, required this.name});
 
   @override
@@ -30,23 +33,31 @@ class _DashboardPageState extends State<DashboardPage>
   late Animation<double> _animation;
 
   late String apiBase;
+  String? savedName;
 
   List<dynamic> dailyData = [];
   List<dynamic> monthlyData = [];
 
   DateTimeRange? selectedRange;
   bool isLoading = true;
+  bool isFetchingData = false;
 
   int totalFarmers = 0;
   int unsyncedCollections = 0;
+
+  Timer? refreshTimer;
 
   @override
   void initState() {
     super.initState();
     apiBase = "${AppConfig.baseUrl}/api";
 
+    _loadSavedName();
+
     _controller = AnimationController(
-        vsync: this, duration: const Duration(milliseconds: 800));
+      vsync: this,
+      duration: const Duration(milliseconds: 800),
+    );
     _animation = CurvedAnimation(parent: _controller, curve: Curves.easeInOut);
     _controller.forward();
 
@@ -57,35 +68,140 @@ class _DashboardPageState extends State<DashboardPage>
     fetchDashboardData(range: selectedRange);
     _loadSyncStats();
 
-    // Auto refresh every 30 seconds
-    Timer.periodic(const Duration(seconds: 30), (timer) {
+    // Listen to milk collection changes for real-time sync count updates
+    final milkBox = Hive.box<MilkCollection>('milk_collections');
+    milkBox.listenable().addListener(() {
+      if (mounted) {
+        _loadSyncStats();
+      }
+    });
+
+    // Single periodic timer
+    refreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       if (mounted) {
         fetchDashboardData(range: selectedRange);
         _loadSyncStats();
       }
     });
+
+    // Central sync point: Download all data when user connects online
+    // This enables offline work for milk graders who sync once, then work without connectivity
+    Future.delayed(Duration.zero, () async {
+      Fluttertoast.showToast(msg: "Syncing data...");
+
+      // Sync farmers - Required for offline milk collection
+      final farmersDownloaded = await FarmerService().downloadFarmers();
+
+      // Sync milk collections - Required for accurate historical totals on receipts
+      final collectionsDownloaded = await SyncService()
+          .downloadMilkCollections();
+
+      if (!mounted) return;
+
+      if (farmersDownloaded && collectionsDownloaded) {
+        Fluttertoast.showToast(
+          msg: "All data synced successfully",
+          backgroundColor: Colors.green,
+          textColor: Colors.white,
+        );
+      } else if (farmersDownloaded || collectionsDownloaded) {
+        Fluttertoast.showToast(
+          msg: "Some data synced",
+          backgroundColor: Colors.orange,
+          textColor: Colors.white,
+        );
+      } else {
+        Fluttertoast.showToast(
+          msg: "Sync incomplete",
+          backgroundColor: Colors.orange,
+          textColor: Colors.white,
+        );
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    refreshTimer?.cancel();
+    _controller.dispose();
+    super.dispose();
   }
 
   Future<void> _loadSyncStats() async {
     final farmersBox = Hive.box<Farmer>('farmers');
     final milkBox = Hive.box<MilkCollection>('milk_collections');
 
+    final newTotalFarmers = farmersBox.length;
+    final newUnsynced = milkBox.values.where((c) => !c.isSynced).length;
+
+    if (newTotalFarmers != totalFarmers || newUnsynced != unsyncedCollections) {
+      setState(() {
+        totalFarmers = newTotalFarmers;
+        unsyncedCollections = newUnsynced;
+      });
+    }
+  }
+
+  Future<void> _loadSavedName() async {
+    final prefs = await SharedPreferences.getInstance();
     setState(() {
-      totalFarmers = farmersBox.length;
-      unsyncedCollections =
-          milkBox.values.where((c) => !c.isSynced).length;
+      savedName =
+          prefs.getString('name') ??
+          prefs.getString('full_name') ??
+          prefs.getString('user_name') ??
+          widget.name;
     });
   }
 
   Future<String?> _getAuthToken() async {
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getString('token');
+    return prefs.getString('auth_token') ??
+        prefs.getString('token') ??
+        prefs.getString('access_token');
+  }
+
+  Future<int?> _getTenantId() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getInt('tenant_id');
+  }
+
+  DateTime _parseMonth(dynamic monthValue) {
+    if (monthValue == null) return DateTime.now();
+    final str = monthValue.toString().trim();
+
+    if (str.contains("-")) {
+      final parts = str.split("-");
+      final year = int.tryParse(parts[0]) ?? DateTime.now().year;
+      final month = int.tryParse(parts[1]) ?? 1;
+      return DateTime(year, month, 1);
+    }
+
+    final m = int.tryParse(str);
+    if (m != null && m >= 1 && m <= 12)
+      return DateTime(DateTime.now().year, m, 1);
+
+    try {
+      return DateTime.parse(str);
+    } catch (_) {
+      return DateTime.now();
+    }
   }
 
   Future<void> fetchDashboardData({DateTimeRange? range}) async {
+    if (isFetchingData) return;
+    isFetchingData = true;
     setState(() => isLoading = true);
+
     try {
       final token = await _getAuthToken();
+      final tenantId = await _getTenantId();
+      if (tenantId == null) {
+        Fluttertoast.showToast(
+          msg: "Missing tenant info. Please login again.",
+          backgroundColor: Colors.redAccent,
+        );
+        return;
+      }
 
       String query = '';
       if (range != null) {
@@ -94,34 +210,41 @@ class _DashboardPageState extends State<DashboardPage>
         query = '?start_date=$start&end_date=$end';
       }
 
+      String url = "$apiBase/dashboard_milk_data$query";
+      url += query.contains("?")
+          ? "&tenant_id=$tenantId"
+          : "?tenant_id=$tenantId";
+
       final res = await http.get(
-        Uri.parse("$apiBase/dashboard_milk_data$query"),
+        Uri.parse(url),
         headers: {
           'Accept': 'application/json',
           if (token != null) 'Authorization': 'Bearer $token',
+          'Content-Type': 'application/json',
         },
       );
 
       if (res.statusCode == 200) {
-        final data = json.decode(res.body);
+        final data = await compute(jsonDecode, res.body);
+        if (!mounted) return;
         setState(() {
           dailyData = List<dynamic>.from(data['daily'] ?? []);
           monthlyData = List<dynamic>.from(data['monthly'] ?? []);
-          isLoading = false;
         });
       } else {
-        setState(() => isLoading = false);
         Fluttertoast.showToast(
           msg: "Failed to fetch data from server.",
           backgroundColor: Colors.redAccent,
         );
       }
     } catch (e) {
-      setState(() => isLoading = false);
       Fluttertoast.showToast(
         msg: "Error: $e",
         backgroundColor: Colors.redAccent,
       );
+    } finally {
+      if (mounted) setState(() => isLoading = false);
+      isFetchingData = false;
     }
   }
 
@@ -133,7 +256,6 @@ class _DashboardPageState extends State<DashboardPage>
       lastDate: DateTime(now.year + 1),
       initialDateRange: selectedRange,
     );
-
     if (picked != null) {
       setState(() => selectedRange = picked);
       fetchDashboardData(range: picked);
@@ -179,10 +301,14 @@ class _DashboardPageState extends State<DashboardPage>
     final success = await SyncService().syncAll();
     if (success) {
       Fluttertoast.showToast(
-          msg: "All data synced successfully", backgroundColor: Colors.green);
+        msg: "All data synced successfully",
+        backgroundColor: Colors.green,
+      );
     } else {
       Fluttertoast.showToast(
-          msg: "Some data could not be synced", backgroundColor: Colors.red);
+        msg: "Some data could not be synced",
+        backgroundColor: Colors.red,
+      );
     }
     _loadSyncStats();
   }
@@ -197,7 +323,9 @@ class _DashboardPageState extends State<DashboardPage>
         title: const Text('Dashboard'),
         backgroundColor: Colors.green.shade700,
         elevation: 2,
-        actions: [IconButton(onPressed: _logout, icon: const Icon(Icons.logout))],
+        actions: [
+          IconButton(onPressed: _logout, icon: const Icon(Icons.logout)),
+        ],
       ),
       drawer: _buildDrawer(),
       body: isLoading
@@ -216,7 +344,7 @@ class _DashboardPageState extends State<DashboardPage>
                       children: [
                         _buildStatCard(
                           'Total Milk',
-                          '${dailyData.fold<double>(0, (p, c) => p + ((c['total_milk'] ?? 0) * 1.0)).toStringAsFixed(2)} L',
+                          '${dailyData.fold<double>(0, (p, c) => p + ((c['total_milk'] ?? c['total'] ?? 0) * 1.0)).toStringAsFixed(2)} L',
                           Icons.local_drink,
                           Colors.green,
                           width: (screenWidth - 48) / 2,
@@ -281,6 +409,9 @@ class _DashboardPageState extends State<DashboardPage>
     );
   }
 
+  // --- remaining widgets (_buildDrawer, _buildStatCard, charts, etc.) ---
+  // Keep your existing implementations as they are. Only the timer, fetchDashboardData, and _loadSyncStats are modified.
+
   Widget _buildGreetingRow(double screenWidth) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -288,16 +419,16 @@ class _DashboardPageState extends State<DashboardPage>
         children: [
           Expanded(
             child: Text(
-              'Hello, ${widget.name}!',
-              style: const TextStyle(
-                fontSize: 22,
-                fontWeight: FontWeight.bold,
-              ),
+              'Hello, ${savedName ?? "User"}!',
+              style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
             ),
           ),
           IconButton(
-            icon: const Icon(Icons.filter_alt_rounded,
-                color: Colors.green, size: 28),
+            icon: const Icon(
+              Icons.filter_alt_rounded,
+              color: Colors.green,
+              size: 28,
+            ),
             tooltip: 'Filter by Date',
             onPressed: pickDateRange,
           ),
@@ -309,55 +440,82 @@ class _DashboardPageState extends State<DashboardPage>
   Widget _buildDrawer() {
     return Drawer(
       child: Container(
-        color: Colors.green.shade700,
-        child: ListView(
-          padding: EdgeInsets.zero,
+        color: const Color(0xFF2E7D32), // Dark green background
+        child: Column(
           children: [
-            UserAccountsDrawerHeader(
-              decoration: BoxDecoration(color: Colors.green.shade800),
-              currentAccountPicture: const CircleAvatar(
-                backgroundColor: Colors.white,
-                child: Icon(Icons.person, size: 40, color: Colors.green),
-              ),
-              accountName: Text(
-                widget.name,
-                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-              ),
-              accountEmail: FutureBuilder<Map<String, dynamic>?>(
-                future: _getUserProfile(),
-                builder: (context, snapshot) {
-                  if (snapshot.connectionState == ConnectionState.waiting) {
-                    return const Text('Loading...');
-                  } else if (snapshot.hasData) {
-                    return Text(snapshot.data?['role'] ?? 'User');
-                  } else {
-                    return const Text('User');
-                  }
-                },
-              ),
-            ),
+            // Header Section
             Container(
-              decoration: const BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.only(
-                  topLeft: Radius.circular(20),
-                  topRight: Radius.circular(20),
-                ),
+              padding: const EdgeInsets.only(
+                top: 50,
+                bottom: 30,
+                left: 20,
+                right: 20,
               ),
               child: Column(
                 children: [
-                  _drawerTile(Icons.person, 'Profile', '/profile'),
-                  _drawerTile(Icons.dashboard, 'Dashboard', '/dashboard'),
-                  _drawerTile(Icons.local_drink, 'Milk Collection', '/milkCollection'),
-                  _drawerTile(Icons.list, 'Milk List', '/milkList'),
-                  _drawerTile(Icons.people, 'Members List', '/farmersList'),
-                  const Divider(),
-                  ListTile(
-                    leading: const Icon(Icons.logout, color: Colors.red),
-                    title: const Text('Logout'),
-                    onTap: _logout,
+                  const CircleAvatar(
+                    radius: 50,
+                    backgroundColor: Colors.white,
+                    child: Icon(
+                      Icons.person,
+                      size: 50,
+                      color: Color(0xFF2E7D32),
+                    ),
+                  ),
+                  const SizedBox(height: 15),
+                  Text(
+                    savedName ?? 'User',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 20,
+                      fontWeight: FontWeight.w500,
+                    ),
                   ),
                 ],
+              ),
+            ),
+
+            // Menu Items
+            Expanded(
+              child: Container(
+                decoration: const BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.only(
+                    topLeft: Radius.circular(30),
+                    topRight: Radius.circular(30),
+                  ),
+                ),
+                child: ListView(
+                  padding: const EdgeInsets.only(top: 20),
+                  children: [
+                    _drawerTile(Icons.person_outline, 'Profile', '/profile'),
+                    _drawerTile(
+                      Icons.dashboard_outlined,
+                      'Dashboard',
+                      '/dashboard',
+                    ),
+                    _drawerTile(
+                      Icons.local_drink_outlined,
+                      'Milk Collection',
+                      '/milkCollection',
+                    ),
+                    _drawerTile(Icons.list_alt, 'Milk List', '/milkList'),
+                    _drawerTile(
+                      Icons.people_outline,
+                      'Members List',
+                      '/farmersList',
+                    ),
+                    const Divider(height: 1, thickness: 1),
+                    _drawerTile(
+                      Icons.print_outlined,
+                      'Printer Settings',
+                      null,
+                      isPrinter: true,
+                    ),
+                    const Divider(height: 1, thickness: 1),
+                    _drawerTile(Icons.logout, 'Logout', null, isLogout: true),
+                  ],
+                ),
               ),
             ),
           ],
@@ -366,16 +524,110 @@ class _DashboardPageState extends State<DashboardPage>
     );
   }
 
-  ListTile _drawerTile(IconData icon, String title, String route) {
+  ListTile _drawerTile(
+    IconData icon,
+    String title,
+    String? route, {
+    bool isPrinter = false,
+    bool isLogout = false,
+  }) {
     return ListTile(
-      leading: Icon(icon, color: Colors.green),
-      title: Text(title),
-      onTap: () => Navigator.pushNamed(context, route),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 5),
+      leading: Icon(
+        icon,
+        color: isLogout ? Colors.red : const Color(0xFF2E7D32),
+        size: 26,
+      ),
+      title: Text(
+        title,
+        style: TextStyle(
+          fontSize: 16,
+          fontWeight: FontWeight.w500,
+          color: isLogout ? Colors.red : Colors.black87,
+        ),
+      ),
+      onTap: () async {
+        Navigator.pop(context); // close drawer
+
+        if (isLogout) {
+          _logout();
+          return;
+        }
+
+        if (isPrinter) {
+          Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => PrinterSettingsPage()),
+          );
+          return;
+        }
+
+        if (route == '/profile') {
+          // Try to fetch profile from API
+          final profile = await _getUserProfile();
+          if (profile != null) {
+            final displayName =
+                profile['name'] ??
+                profile['full_name'] ??
+                profile['username'] ??
+                '';
+            final email = profile['email'] ?? '';
+            final phone = profile['phone'] ?? profile['mobile'] ?? '';
+            final role = profile['role'] ?? profile['position'] ?? '';
+
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => ProfilePage(
+                  name: displayName,
+                  email: email,
+                  phone: phone,
+                  role: role,
+                ),
+              ),
+            );
+            return;
+          }
+
+          // Fallback: use saved prefs if API failed
+          final prefs = await SharedPreferences.getInstance();
+          final savedName =
+              prefs.getString('name') ??
+              prefs.getString('full_name') ??
+              prefs.getString('user_name') ??
+              '';
+          final savedEmail = prefs.getString('email') ?? '';
+          final savedPhone = prefs.getString('phone') ?? '';
+          final savedRole = prefs.getString('role') ?? '';
+
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => ProfilePage(
+                name: savedName,
+                email: savedEmail,
+                phone: savedPhone,
+                role: savedRole,
+              ),
+            ),
+          );
+          return;
+        }
+
+        if (route != null) {
+          Navigator.pushNamed(context, route);
+        }
+      },
     );
   }
 
-  Widget _buildStatCard(String title, String value, IconData icon, Color color,
-      {double width = 150}) {
+  Widget _buildStatCard(
+    String title,
+    String value,
+    IconData icon,
+    Color color, {
+    double width = 150,
+  }) {
     return Container(
       width: width,
       padding: const EdgeInsets.all(16),
@@ -405,15 +657,22 @@ class _DashboardPageState extends State<DashboardPage>
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(title,
-                    style: const TextStyle(
-                        fontSize: 14, fontWeight: FontWeight.w600)),
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
                 const SizedBox(height: 4),
-                Text(value,
-                    style: const TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.black87)),
+                Text(
+                  value,
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.black87,
+                  ),
+                ),
               ],
             ),
           ),
@@ -427,27 +686,47 @@ class _DashboardPageState extends State<DashboardPage>
     if (dailyData.isEmpty) return const SizedBox.shrink();
 
     final maxY = dailyData
-        .map((e) => (e['total_milk'] ?? 0) * 1.0)
+        .map((e) => (e['total_milk'] ?? e['total'] ?? 0) * 1.0)
         .fold<double>(0, (a, b) => a > b ? a : b);
 
     final bars = <BarChartGroupData>[];
     for (int i = 0; i < dailyData.length; i++) {
-      bars.add(BarChartGroupData(
-        x: i,
-        barRods: [
-          BarChartRodData(
-            toY: (dailyData[i]['total_milk'] ?? 0) * 1.0,
-            color: Colors.green,
-            width: 16,
-            borderRadius: BorderRadius.circular(6),
-            backDrawRodData: BackgroundBarChartRodData(
-              show: true,
-              toY: maxY,
-              color: Colors.green.withOpacity(0.2),
+      final item = dailyData[i];
+      double y = 0;
+      try {
+        y = (item['total_milk'] ?? item['total'] ?? 0) * 1.0;
+      } catch (_) {
+        y = 0;
+      }
+
+      // safe parse date label
+      String label = '';
+      try {
+        final d = DateTime.parse(item['date'].toString());
+        label = DateFormat('MM/dd').format(d);
+      } catch (_) {
+        label = item['date']?.toString() ?? '';
+      }
+
+      bars.add(
+        BarChartGroupData(
+          x: i,
+          barRods: [
+            BarChartRodData(
+              toY: y,
+              // color property is used by fl_chart - keep default color handling here
+              color: Colors.green,
+              width: 16,
+              borderRadius: BorderRadius.circular(6),
+              backDrawRodData: BackgroundBarChartRodData(
+                show: true,
+                toY: maxY,
+                color: Colors.green.withOpacity(0.2),
+              ),
             ),
-          ),
-        ],
-      ));
+          ],
+        ),
+      );
     }
 
     return Card(
@@ -457,8 +736,10 @@ class _DashboardPageState extends State<DashboardPage>
         padding: const EdgeInsets.all(16),
         child: Column(
           children: [
-            const Text("Daily Milk Collection (Litres)",
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+            const Text(
+              "Daily Milk Collection (Litres)",
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            ),
             const SizedBox(height: 16),
             SizedBox(
               height: 200,
@@ -472,19 +753,30 @@ class _DashboardPageState extends State<DashboardPage>
                         showTitles: true,
                         reservedSize: 36,
                         getTitlesWidget: (value, meta) {
-                          if (value.toInt() < dailyData.length) {
+                          final idx = value.toInt();
+                          if (idx < 0 || idx >= dailyData.length)
+                            return const Text('');
+                          final raw = dailyData[idx]['date']?.toString() ?? '';
+                          try {
+                            final d = DateTime.parse(raw);
                             return Text(
-                              DateFormat('MM/dd').format(
-                                  DateTime.parse(dailyData[value.toInt()]['date'])),
+                              DateFormat('MM/dd').format(d),
+                              style: const TextStyle(fontSize: 10),
+                            );
+                          } catch (_) {
+                            return Text(
+                              raw,
                               style: const TextStyle(fontSize: 10),
                             );
                           }
-                          return const Text('');
                         },
                       ),
                     ),
                     leftTitles: const AxisTitles(
-                      sideTitles: SideTitles(showTitles: true, reservedSize: 36),
+                      sideTitles: SideTitles(
+                        showTitles: true,
+                        reservedSize: 36,
+                      ),
                     ),
                   ),
                   barGroups: bars,
@@ -492,10 +784,12 @@ class _DashboardPageState extends State<DashboardPage>
                     enabled: true,
                     touchTooltipData: BarTouchTooltipData(
                       getTooltipItem: (group, groupIndex, rod, rodIndex) {
-                        final date = DateFormat('MM/dd').format(
-                            DateTime.parse(dailyData[groupIndex]['date']));
+                        final idx = group.x.toInt();
+                        final dateLabel = (idx >= 0 && idx < dailyData.length)
+                            ? (dailyData[idx]['date']?.toString() ?? '')
+                            : '';
                         return BarTooltipItem(
-                          "$date\n${rod.toY} L",
+                          "$dateLabel\n${rod.toY} L",
                           const TextStyle(color: Colors.white),
                         );
                       },
@@ -514,9 +808,29 @@ class _DashboardPageState extends State<DashboardPage>
     if (monthlyData.isEmpty) return const SizedBox.shrink();
 
     final spots = <FlSpot>[];
+    final monthLabels = <String>[];
+
     for (int i = 0; i < monthlyData.length; i++) {
-      spots.add(FlSpot(i.toDouble(), (monthlyData[i]['total_milk'] ?? 0) * 1.0));
+      final m = monthlyData[i];
+
+      // determine the month token in the API response
+      final monthToken = m['month'] ?? m['month_name'] ?? m['m'] ?? m['label'];
+      final parsed = _parseMonth(monthToken);
+
+      final label = DateFormat('MMM yyyy').format(parsed);
+      monthLabels.add(label);
+
+      // flexible total field names
+      final totalVal = (m['total_milk'] ?? m['total'] ?? m['totalMilk'] ?? 0);
+      final y = double.tryParse(totalVal.toString()) ?? 0.0;
+
+      spots.add(FlSpot(i.toDouble(), y));
     }
+
+    // adjust view if needed
+    final minX = 0.0;
+    final maxX = (spots.isNotEmpty) ? spots.last.x : 0.0;
+    final maxY = spots.fold<double>(0.0, (prev, s) => s.y > prev ? s.y : prev);
 
     return Card(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
@@ -525,34 +839,42 @@ class _DashboardPageState extends State<DashboardPage>
         padding: const EdgeInsets.all(16),
         child: Column(
           children: [
-            const Text("Monthly Milk Collection Trend",
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+            const Text(
+              "Monthly Milk Collection Trend",
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            ),
             const SizedBox(height: 16),
             SizedBox(
               height: 200,
               child: LineChart(
                 LineChartData(
+                  minX: minX,
+                  maxX: maxX,
+                  minY: 0,
+                  maxY: (maxY * 1.2).clamp(1.0, double.infinity),
                   borderData: FlBorderData(show: true),
                   gridData: const FlGridData(show: true),
                   titlesData: FlTitlesData(
                     bottomTitles: AxisTitles(
                       sideTitles: SideTitles(
                         showTitles: true,
-                        reservedSize: 36,
+                        reservedSize: 42,
                         getTitlesWidget: (value, meta) {
-                          final months = [
-                            'Jan','Feb','Mar','Apr','May','Jun',
-                            'Jul','Aug','Sep','Oct','Nov','Dec'
-                          ];
+                          final idx = value.toInt();
+                          if (idx < 0 || idx >= monthLabels.length)
+                            return const Text('');
                           return Text(
-                            months[value.toInt() % 12],
-                            style: const TextStyle(fontSize: 12),
+                            monthLabels[idx],
+                            style: const TextStyle(fontSize: 10),
                           );
                         },
                       ),
                     ),
                     leftTitles: const AxisTitles(
-                      sideTitles: SideTitles(showTitles: true, reservedSize: 36),
+                      sideTitles: SideTitles(
+                        showTitles: true,
+                        reservedSize: 36,
+                      ),
                     ),
                   ),
                   lineBarsData: [
@@ -571,14 +893,13 @@ class _DashboardPageState extends State<DashboardPage>
                     enabled: true,
                     touchTooltipData: LineTouchTooltipData(
                       getTooltipItems: (touchedSpots) {
-                        return touchedSpots.map((spot) {
-                          final monthIndex = spot.x.toInt() % 12;
-                          final months = [
-                            'Jan','Feb','Mar','Apr','May','Jun',
-                            'Jul','Aug','Sep','Oct','Nov','Dec'
-                          ];
+                        return touchedSpots.map((spotItem) {
+                          final idx = spotItem.x.toInt();
+                          final label = (idx >= 0 && idx < monthLabels.length)
+                              ? monthLabels[idx]
+                              : '';
                           return LineTooltipItem(
-                            "${months[monthIndex]}\n${spot.y.toStringAsFixed(2)} L",
+                            "$label\n${spotItem.y.toStringAsFixed(2)} L",
                             const TextStyle(color: Colors.white),
                           );
                         }).toList();
@@ -598,9 +919,15 @@ class _DashboardPageState extends State<DashboardPage>
     if (monthlyData.isEmpty) return const SizedBox.shrink();
 
     final totalMorning = monthlyData.fold<double>(
-        0, (sum, item) => sum + ((item['total_morning'] ?? 0) * 1.0));
+      0,
+      (sum, item) =>
+          sum + ((item['total_morning'] ?? item['morning'] ?? 0) * 1.0),
+    );
     final totalEvening = monthlyData.fold<double>(
-        0, (sum, item) => sum + ((item['total_evening'] ?? 0) * 1.0));
+      0,
+      (sum, item) =>
+          sum + ((item['total_evening'] ?? item['evening'] ?? 0) * 1.0),
+    );
 
     final total = totalMorning + totalEvening;
     if (total == 0) return const SizedBox.shrink();
@@ -615,8 +942,10 @@ class _DashboardPageState extends State<DashboardPage>
         padding: const EdgeInsets.all(16),
         child: Column(
           children: [
-            const Text("Morning vs Evening Milk",
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+            const Text(
+              "Morning vs Evening Milk",
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            ),
             const SizedBox(height: 16),
             SizedBox(
               height: 200,
@@ -629,9 +958,10 @@ class _DashboardPageState extends State<DashboardPage>
                       title: "Morning\n${morningPercent.toStringAsFixed(1)}%",
                       radius: 60,
                       titleStyle: const TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.white),
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
                     ),
                     PieChartSectionData(
                       color: Colors.blue,
@@ -639,9 +969,10 @@ class _DashboardPageState extends State<DashboardPage>
                       title: "Evening\n${eveningPercent.toStringAsFixed(1)}%",
                       radius: 60,
                       titleStyle: const TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.white),
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
                     ),
                   ],
                   sectionsSpace: 4,

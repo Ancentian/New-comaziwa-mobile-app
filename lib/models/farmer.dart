@@ -19,29 +19,60 @@ class Farmer extends HiveObject {
   @HiveField(4)
   String contact;
 
+  @HiveField(5)
+  double monthlyTotal;
+
+  @HiveField(6)
+  double yearlyTotal;
+
   Farmer({
     required this.farmerId,
     required this.fname,
     required this.lname,
     required this.centerName,
     required this.contact,
+    this.monthlyTotal = 0.0,
+    this.yearlyTotal = 0.0,
   });
 
   factory Farmer.fromJson(Map<String, dynamic> json) {
-    return Farmer(
-      farmerId: json['farmerID'] is int ? json['farmerID'] : int.parse('${json['farmerID']}'),
-      fname: json['fname']?.toString() ?? '',
-      lname: json['lname']?.toString() ?? '',
-      centerName: json['center_name']?.toString() ?? json['centerName']?.toString() ?? '',
-      contact: json['contact1']?.toString() ?? json['contact']?.toString() ?? '',
-    );
+    try {
+      return Farmer(
+        farmerId: json['farmerID'] is int
+            ? json['farmerID']
+            : int.parse('${json['farmerID']}'),
+        fname: json['fname']?.toString() ?? '',
+        lname: json['lname']?.toString() ?? '',
+        centerName:
+            json['center_name']?.toString() ??
+            json['centerName']?.toString() ??
+            '',
+        contact:
+            json['contact1']?.toString() ?? json['contact']?.toString() ?? '',
+        monthlyTotal: _safeDouble(json['monthly_total']),
+        yearlyTotal: _safeDouble(json['yearly_total']),
+      );
+    } catch (e) {
+      print('Error parsing farmer: $e');
+      rethrow;
+    }
+  }
+
+  static double _safeDouble(dynamic value) {
+    if (value == null) return 0.0;
+    if (value is double) return value;
+    if (value is int) return value.toDouble();
+    if (value is String) return double.tryParse(value) ?? 0.0;
+    return 0.0;
   }
 
   Map<String, dynamic> toJson() => {
-        'farmerID': farmerId,
-        'fname': fname,
-        'lname': lname,
-        'center_name': centerName,
-        'contact1': contact,
-      };
+    'farmerID': farmerId,
+    'fname': fname,
+    'lname': lname,
+    'center_name': centerName,
+    'contact1': contact,
+    'monthly_total': monthlyTotal,
+    'yearly_total': yearlyTotal,
+  };
 }

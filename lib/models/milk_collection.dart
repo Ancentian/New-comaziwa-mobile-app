@@ -31,6 +31,9 @@ class MilkCollection extends HiveObject {
   @HiveField(8)
   String? lname;
 
+  @HiveField(9)
+  int? serverId; // ID from server after sync
+
   MilkCollection({
     required this.farmerId,
     required this.date,
@@ -41,6 +44,7 @@ class MilkCollection extends HiveObject {
     this.center_name,
     this.fname,
     this.lname,
+    this.serverId,
   });
 
   Map<String, dynamic> toJson() {
@@ -53,6 +57,23 @@ class MilkCollection extends HiveObject {
       "center_name": center_name,
       "fname": fname,
       "lname": lname,
+      "server_id": serverId,
     };
+  }
+
+  /// Create MilkCollection from API response
+  factory MilkCollection.fromJson(Map<String, dynamic> json) {
+    return MilkCollection(
+      farmerId: json['farmer_id'] ?? 0,
+      date: json['collection_date'] ?? '',
+      morning: (json['morning'] ?? 0).toDouble(),
+      evening: (json['evening'] ?? 0).toDouble(),
+      rejected: (json['rejected'] ?? 0).toDouble(),
+      isSynced: true, // From server = already synced
+      center_name: json['center_name'],
+      fname: json['fname'],
+      lname: json['lname'],
+      serverId: json['id'],
+    );
   }
 }

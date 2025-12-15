@@ -5,12 +5,13 @@ import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart';
 import 'package:fluttertoast/fluttertoast.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:fl_chart/fl_chart.dart';
 import 'package:hive/hive.dart';
 import '../config/app_config.dart';
 import '../models/farmer.dart';
 import '../models/milk_collection.dart';
 import '../services/sync_service.dart';
+import '../services/printer_service.dart';
+import '../services/auto_print_service.dart';
 
 class MilkCollectionPage extends StatefulWidget {
   const MilkCollectionPage({super.key});
@@ -21,20 +22,27 @@ class MilkCollectionPage extends StatefulWidget {
 
 class _MilkCollectionPageState extends State<MilkCollectionPage>
     with SingleTickerProviderStateMixin {
-
   final TextEditingController _memberNoController = TextEditingController();
-  final TextEditingController _morningController = TextEditingController(text: "0");
-  final TextEditingController _eveningController = TextEditingController(text: "0");
-  final TextEditingController _rejectedController = TextEditingController(text: "0");
+  final TextEditingController _morningController = TextEditingController(
+    text: "0",
+  );
+  final TextEditingController _eveningController = TextEditingController(
+    text: "0",
+  );
+  final TextEditingController _rejectedController = TextEditingController(
+    text: "0",
+  );
 
   // error flags for validation
   bool _morningError = false;
   bool _eveningError = false;
+  bool _isSubmitting = false; // Prevent double submission
 
   double total = 0.0;
   Map<String, dynamic>? farmer;
   double todaysTotal = 0.0;
   double monthlyTotal = 0.0;
+  double yearlyTotal = 0.0; // Pre-calculated from API
   DateTime selectedDate = DateTime.now();
 
   late final String apiBase;
@@ -51,8 +59,10 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
     _eveningController.addListener(_calculateTotal);
     _rejectedController.addListener(_calculateTotal);
 
-    _animationController =
-        AnimationController(vsync: this, duration: const Duration(milliseconds: 500));
+    _animationController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 500),
+    );
     _fadeAnimation = CurvedAnimation(
       parent: _animationController,
       curve: Curves.easeInOut,
@@ -60,6 +70,9 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
 
     // Start automatic syncing
     SyncService().startSyncListener();
+
+    // Note: Milk collections are already synced on dashboard load
+    // No need to sync again here for better offline performance
   }
 
   @override
@@ -76,14 +89,52 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
   void _calculateTotal() {
     final morning = double.tryParse(_morningController.text) ?? 0;
     final evening = double.tryParse(_eveningController.text) ?? 0;
+    final rejected = double.tryParse(_rejectedController.text) ?? 0;
     setState(() {
-      total = morning + evening;
+      total = morning + evening - rejected;
     });
   }
 
   Future<String?> _getAuthToken() async {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getString('token');
+  }
+
+  /// --------------------------------------------------------
+  /// Get saved tenant_id (user.id OR employee.tenant_id)
+  /// --------------------------------------------------------
+  Future<int?> _getTenantId() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getInt('tenant_id'); // Must exist for multi-tenancy
+  }
+
+  /// Fetch totals from API for a specific farmer
+  Future<void> _fetchTotalsForFarmer(int farmerId) async {
+    try {
+      final token = await _getAuthToken();
+      final tenantId = await _getTenantId();
+
+      if (token != null && tenantId != null) {
+        final res = await http.get(
+          Uri.parse("$apiBase/find-farmer/$farmerId?tenant_id=$tenantId"),
+          headers: {"Authorization": "Bearer $token"},
+        );
+
+        if (res.statusCode == 200) {
+          final data = json.decode(res.body);
+          setState(() {
+            todaysTotal = (data['todays_total'] ?? 0).toDouble();
+            monthlyTotal = (data['monthly_total'] ?? 0).toDouble();
+            yearlyTotal = (data['yearly_total'] ?? 0).toDouble();
+          });
+          print(
+            "✅ Totals updated: Today=$todaysTotal, Monthly=$monthlyTotal, Yearly=$yearlyTotal",
+          );
+        }
+      }
+    } catch (e) {
+      print("⚠️ Could not fetch totals: $e");
+    }
   }
 
   // /// Offline-first farmer search
@@ -167,148 +218,285 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
   //   });
   // }
   /// Offline-first farmer search with debounce
-Future<void> searchFarmer(String memberNo) async {
-  // Cancel any previous debounce
-  _debounce?.cancel();
+  Future<void> searchFarmer(String memberNo) async {
+    // Cancel any previous debounce
+    _debounce?.cancel();
 
-  // Start a new debounce timer
-  _debounce = Timer(const Duration(milliseconds: 400), () async {
-    if (memberNo.isEmpty) return;
-
-    final farmersBox = Hive.box<Farmer>('farmers');
-
-    // 1. Try offline search first
-    final cached = farmersBox.values.cast<Farmer?>().firstWhere(
-      (f) => f != null && f.farmerId.toString() == memberNo,
-      orElse: () => null,
-    );
-
-    if (cached != null) {
+    // Clear farmer immediately when user continues typing
+    if (farmer != null && memberNo != farmer!['farmerID'].toString()) {
       setState(() {
-        farmer = {
-          "farmerID": cached.farmerId,
-          "fname": cached.fname,
-          "lname": cached.lname,
-          "center_name": cached.centerName,
-          "contact1": cached.contact,
-        };
+        farmer = null;
+        _animationController.reverse();
       });
-      Fluttertoast.showToast(
-        msg: "Farmer loaded offline",
-        backgroundColor: Colors.green,
-        textColor: Colors.white,
-      );
-      _animationController.forward(from: 0);
-      return; // Stop here if found offline
     }
 
-    // 2. Online search if not found offline
-    final token = await _getAuthToken();
-    if (token == null) {
-      Fluttertoast.showToast(
-        msg: "Login required",
-        backgroundColor: Colors.red,
-        textColor: Colors.white,
+    // Start a new debounce timer (wait for user to finish typing)
+    _debounce = Timer(const Duration(milliseconds: 800), () async {
+      if (memberNo.isEmpty) {
+        setState(() {
+          farmer = null;
+        });
+        return;
+      }
+
+      final farmersBox = Hive.box<Farmer>('farmers');
+
+      // 1. Try offline search first
+      final cached = farmersBox.values.cast<Farmer?>().firstWhere(
+        (f) => f != null && f.farmerId.toString() == memberNo,
+        orElse: () => null,
       );
-      return;
-    }
 
-    try {
-      final res = await http.get(
-        Uri.parse("$apiBase/find-farmer/$memberNo"),
-        headers: {"Authorization": "Bearer $token"},
-      );
+      if (cached != null) {
+        setState(() {
+          farmer = {
+            "farmerID": cached.farmerId,
+            "fname": cached.fname,
+            "lname": cached.lname,
+            "center_name": cached.centerName,
+            "contact1": cached.contact,
+          };
+          // Use offline totals from synced farmer data
+          todaysTotal = 0.0; // Today's total needs fresh calculation
+          monthlyTotal = cached.monthlyTotal;
+          yearlyTotal = cached.yearlyTotal;
+        });
 
-      if (res.statusCode == 200) {
-        final data = json.decode(res.body);
-        final f = Farmer.fromJson(data['farmer']);
+        print(
+          "✅ Using offline totals: Monthly=$monthlyTotal, Yearly=$yearlyTotal",
+        );
 
-        // Save offline
-        farmersBox.put(f.farmerId, f);
-
-        setState(() => farmer = data['farmer']);
         Fluttertoast.showToast(
-          msg: "Farmer loaded online",
+          msg: "Farmer loaded offline",
           backgroundColor: Colors.green,
           textColor: Colors.white,
         );
         _animationController.forward(from: 0);
-      } else {
+        return; // Stop here if found offline
+      }
+
+      // 2. Online search if not found offline
+      final token = await _getAuthToken();
+
+      final tenantId = await _getTenantId();
+
+      if (token == null) {
         Fluttertoast.showToast(
-          msg: "Farmer not found",
+          msg: "Login required",
           backgroundColor: Colors.red,
           textColor: Colors.white,
         );
+        return;
       }
-    } catch (_) {
-      Fluttertoast.showToast(
-        msg: "No internet — offline search only",
-        backgroundColor: Colors.orange,
-        textColor: Colors.white,
-      );
-    }
-  });
-}
 
+      if (tenantId == null) {
+        Fluttertoast.showToast(
+          msg: "Missing tenant info. Please login again.",
+          backgroundColor: Colors.redAccent,
+        );
+        return;
+      }
+
+      try {
+        String baseUrl = "$apiBase/find-farmer/$memberNo";
+        String url;
+
+        if (baseUrl.contains("?")) {
+          url = "$baseUrl&tenant_id=$tenantId";
+        } else {
+          url = "$baseUrl?tenant_id=$tenantId";
+        }
+
+        final res = await http.get(
+          Uri.parse(url),
+          headers: {"Authorization": "Bearer $token"},
+        );
+
+        if (res.statusCode == 200) {
+          final data = json.decode(res.body);
+          final f = Farmer.fromJson(data['farmer']);
+
+          // Save offline
+          farmersBox.put(f.farmerId, f);
+
+          // Store farmer data with pre-calculated totals from API
+          setState(() {
+            farmer = data['farmer'];
+            todaysTotal = (data['todays_total'] ?? 0).toDouble();
+            monthlyTotal = (data['monthly_total'] ?? 0).toDouble();
+            yearlyTotal = (data['yearly_total'] ?? 0).toDouble();
+          });
+
+          Fluttertoast.showToast(
+            msg: "Farmer loaded online",
+            backgroundColor: Colors.green,
+            textColor: Colors.white,
+          );
+          _animationController.forward(from: 0);
+        } else {
+          Fluttertoast.showToast(
+            msg: "Farmer not found",
+            backgroundColor: Colors.red,
+            textColor: Colors.white,
+          );
+        }
+      } catch (_) {
+        Fluttertoast.showToast(
+          msg: "No internet — offline search only",
+          backgroundColor: Colors.orange,
+          textColor: Colors.white,
+        );
+      }
+    });
+  }
 
   /// Submit milk collection (offline-first, sync later)
   Future<void> _submitCollection() async {
-  if (farmer == null) {
-    Fluttertoast.showToast(msg: "Please select farmer");
-    return;
-  }
+    // Prevent double submission
+    if (_isSubmitting) {
+      return;
+    }
 
-  double morning = double.tryParse(_morningController.text) ?? 0;
-  double evening = double.tryParse(_eveningController.text) ?? 0;
+    if (farmer == null) {
+      Fluttertoast.showToast(msg: "Please select farmer");
+      return;
+    }
 
-  // ============================
-  //  VALIDATION RULE
-  // ============================
-  if (morning <= 0 && evening <= 0) {
+    double morning = double.tryParse(_morningController.text) ?? 0;
+    double evening = double.tryParse(_eveningController.text) ?? 0;
+
+    // ============================
+    //  VALIDATION RULE
+    // ============================
+    if (morning <= 0 && evening <= 0) {
+      setState(() {
+        _morningError = true;
+        _eveningError = true;
+      });
+
+      Fluttertoast.showToast(
+        msg: "Morning or Evening must be greater than 0",
+        backgroundColor: Colors.red,
+        textColor: Colors.white,
+      );
+      return; // STOP submission
+    }
+
     setState(() {
-      _morningError = true;
-      _eveningError = true;
+      _morningError = false;
+      _eveningError = false;
+      _isSubmitting = true; // Lock submission
     });
 
-    Fluttertoast.showToast(
-      msg: "Morning or Evening must be greater than 0",
-      backgroundColor: Colors.red,
-      textColor: Colors.white,
-    );
-    return; // STOP submission
+    try {
+      final collection = MilkCollection(
+        farmerId: int.parse(farmer!['farmerID'].toString()),
+        date: DateFormat('yyyy-MM-dd').format(selectedDate),
+        morning: morning,
+        evening: evening,
+        rejected: double.tryParse(_rejectedController.text) ?? 0,
+        isSynced: false,
+        center_name: farmer!['center_name'],
+        fname: farmer!['fname'],
+        lname: farmer!['lname'],
+      );
+
+      // Save offline
+      final box = Hive.box<MilkCollection>('milk_collections');
+      await box.add(collection);
+
+      bool success = await SyncService().syncCollections();
+      Fluttertoast.showToast(
+        msg: success ? "Collection synced!" : "Saved offline",
+        backgroundColor: success ? Colors.green : Colors.orange,
+        textColor: Colors.white,
+      );
+
+      // Auto-print receipt if enabled
+      if (AutoPrintService.isAutoPrintEnabled()) {
+        _autoPrintReceipt(collection);
+      }
+
+      _resetForm();
+    } finally {
+      setState(() {
+        _isSubmitting = false; // Unlock submission
+      });
+    }
   }
 
-  setState(() {
-    _morningError = false;
-    _eveningError = false;
-  });
+  /// Auto-print receipt after saving collection
+  Future<void> _autoPrintReceipt(MilkCollection collection) async {
+    try {
+      // Use downloaded totals from server + add only unsynced local collections
+      final today = DateTime.now();
+      final todayStr = DateFormat('yyyy-MM-dd').format(today);
 
-  final collection = MilkCollection(
-    farmerId: int.parse(farmer!['farmerID'].toString()),
-    date: DateFormat('yyyy-MM-dd').format(selectedDate),
-    morning: morning,
-    evening: evening,
-    rejected: double.tryParse(_rejectedController.text) ?? 0,
-    isSynced: false,
-    center_name: farmer!['center_name'],
-    fname: farmer!['fname'],
-    lname: farmer!['lname'],
-  );
+      double todayTotal = 0;
+      double additionalMonthly = 0;
+      double additionalYearly = 0;
 
-  // Save offline
-  final box = Hive.box<MilkCollection>('milk_collections');
-  await box.add(collection);
+      // Only add unsynced (offline) collections to the server totals
+      final box = Hive.box<MilkCollection>('milk_collections');
+      for (var record in box.values) {
+        if (record.farmerId == collection.farmerId && !record.isSynced) {
+          final recordDate = DateTime.tryParse(record.date);
+          if (recordDate != null) {
+            final recordTotal =
+                record.morning + record.evening - record.rejected;
 
-  bool success = await SyncService().syncCollections();
-  Fluttertoast.showToast(
-    msg: success ? "Collection synced!" : "Saved offline",
-    backgroundColor: success ? Colors.green : Colors.orange,
-    textColor: Colors.white,
-  );
+            // Today's total
+            if (DateFormat('yyyy-MM-dd').format(recordDate) == todayStr) {
+              todayTotal += recordTotal;
+            }
 
-  _resetForm();
-}
+            // Monthly additions
+            if (recordDate.year == today.year &&
+                recordDate.month == today.month) {
+              additionalMonthly += recordTotal;
+            }
 
+            // Yearly additions
+            if (recordDate.year == today.year) {
+              additionalYearly += recordTotal;
+            }
+          }
+        }
+      }
+
+      // Downloaded totals + unsynced additions
+      final monthTotal = monthlyTotal + additionalMonthly;
+      final yearTotal = yearlyTotal + additionalYearly;
+
+      // Get company name from SharedPreferences
+      final prefs = await SharedPreferences.getInstance();
+      final companyName = prefs.getString('company_name');
+
+      // Build receipt data with all totals
+      final receiptData = {
+        'farmerID': collection.farmerId.toString(),
+        'fname': collection.fname,
+        'lname': collection.lname,
+        'center_name': collection.center_name,
+        'collection_date': collection.date,
+        'morning': collection.morning.toString(),
+        'evening': collection.evening.toString(),
+        'rejected': collection.rejected.toString(),
+        'total': (collection.morning + collection.evening - collection.rejected)
+            .toString(),
+        'today_total': todayTotal.toStringAsFixed(2),
+        'monthly_total': monthlyTotal.toStringAsFixed(2),
+        'yearly_total': yearlyTotal.toStringAsFixed(2),
+        'company_name': companyName,
+      };
+
+      final receiptWidget = ReceiptBuilder.milkReceipt(receiptData);
+      await PrinterService.printWithRetry(receiptWidget, context, retries: 2);
+    } catch (e) {
+      // Silent fail - don't interrupt the save flow
+      print('Auto-print failed: $e');
+    }
+  }
 
   void _resetForm() {
     _morningController.text = '0';
@@ -361,18 +549,55 @@ Future<void> searchFarmer(String memberNo) async {
         padding: const EdgeInsets.all(16),
         child: Column(
           children: [
-            // Member input
-            TextField(
-              controller: _memberNoController,
-              onChanged: (value) => searchFarmer(value),
-              decoration: InputDecoration(
-                labelText: 'Enter Member Number',
-                suffixIcon: const Icon(Icons.search),
-                border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12)),
+            // Enhanced Search Bar
+            Container(
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(16),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.green.withOpacity(0.1),
+                    blurRadius: 10,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: TextField(
+                controller: _memberNoController,
+                onChanged: (value) => searchFarmer(value),
+                style: const TextStyle(fontSize: 16),
+                decoration: InputDecoration(
+                  labelText: 'Search Farmer by Member Number',
+                  hintText: 'e.g., 508',
+                  prefixIcon: Icon(
+                    Icons.person_search,
+                    color: Colors.green.shade700,
+                  ),
+                  suffixIcon: _memberNoController.text.isNotEmpty
+                      ? IconButton(
+                          icon: const Icon(Icons.clear, color: Colors.grey),
+                          onPressed: () {
+                            _memberNoController.clear();
+                            setState(() {
+                              farmer = null;
+                            });
+                          },
+                        )
+                      : Icon(Icons.search, color: Colors.green.shade300),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(16),
+                    borderSide: BorderSide.none,
+                  ),
+                  filled: true,
+                  fillColor: Colors.grey.shade50,
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 20,
+                    vertical: 16,
+                  ),
+                ),
               ),
             ),
-            const SizedBox(height: 20),
+            const SizedBox(height: 24),
 
             if (farmer != null)
               FadeTransition(
@@ -384,56 +609,241 @@ Future<void> searchFarmer(String memberNo) async {
               ),
 
             if (farmer != null) ...[
-              const SizedBox(height: 20),
+              const SizedBox(height: 24),
               _buildDateField(),
-              const SizedBox(height: 20),
-              Row(
-                children: [
-                  Expanded(child: _buildInput(_morningController, 'Morning (L)')),
-                  const SizedBox(width: 10),
-                  Expanded(child: _buildInput(_eveningController, 'Evening (L)')),
-                  const SizedBox(width: 10),
-                  Expanded(child: _buildInput(_rejectedController, 'Rejected (L)')),
-                ],
-              ),
-              const SizedBox(height: 20),
-
-              Row(
-                children: [
-                  Expanded(child: _buildStatCard('Today', todaysTotal, Colors.green)),
-                  const SizedBox(width: 10),
-                  Expanded(child: _buildStatCard('Month', monthlyTotal, Colors.blue)),
-                ],
-              ),
-              const SizedBox(height: 20),
-
-              TweenAnimationBuilder<double>(
-                tween: Tween<double>(begin: 0, end: total),
-                duration: const Duration(milliseconds: 600),
-                builder: (context, value, child) {
-                  return _buildTotalField(value);
-                },
-              ),
-
-              const SizedBox(height: 30),
-
-              ElevatedButton.icon(
-                onPressed: _submitCollection,
-                icon: const Icon(Icons.save, color: Colors.white),
-                label: const Text(
-                  'Save Collection',
-                  style: TextStyle(color: Colors.white),
+              const SizedBox(height: 24),
+              // Milk Input Section
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: Colors.green.shade200, width: 1),
                 ),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.green,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 24),
-                  textStyle: const TextStyle(fontSize: 16),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(
+                          Icons.water_drop,
+                          color: Colors.green.shade700,
+                          size: 20,
+                        ),
+                        const SizedBox(width: 8),
+                        const Text(
+                          'Enter Milk Quantity (Litres)',
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _buildInput(
+                            _morningController,
+                            'Morning',
+                            icon: Icons.wb_sunny_outlined,
+                            error: _morningError,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: _buildInput(
+                            _eveningController,
+                            'Evening',
+                            icon: Icons.nightlight_outlined,
+                            error: _eveningError,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    _buildInput(
+                      _rejectedController,
+                      'Rejected (Optional)',
+                      icon: Icons.remove_circle_outline,
+                    ),
+                    const SizedBox(height: 16),
+                    // Total Display
+                    Container(
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: [
+                            Colors.green.shade600,
+                            Colors.green.shade700,
+                          ],
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                        ),
+                        borderRadius: BorderRadius.circular(12),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.green.withOpacity(0.3),
+                            blurRadius: 8,
+                            offset: const Offset(0, 4),
+                          ),
+                        ],
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Row(
+                            children: [
+                              Container(
+                                padding: const EdgeInsets.all(8),
+                                decoration: BoxDecoration(
+                                  color: Colors.white.withOpacity(0.2),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: const Icon(
+                                  Icons.calculate,
+                                  color: Colors.white,
+                                  size: 24,
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              const Text(
+                                'Total Accepted',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ),
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: [
+                              Text(
+                                total.toStringAsFixed(2),
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 32,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              const SizedBox(width: 4),
+                              const Padding(
+                                padding: EdgeInsets.only(bottom: 6),
+                                child: Text(
+                                  'L',
+                                  style: TextStyle(
+                                    color: Colors.white70,
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 20),
+
+              // Statistics Section
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade50,
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(
+                          Icons.analytics_outlined,
+                          color: Colors.grey.shade700,
+                          size: 20,
+                        ),
+                        const SizedBox(width: 8),
+                        const Text(
+                          'Your Statistics',
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _buildStatCard(
+                            'Today',
+                            todaysTotal,
+                            Colors.green,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: _buildStatCard(
+                            'This Month',
+                            monthlyTotal,
+                            Colors.blue,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 24),
+              SizedBox(
+                width: double.infinity,
+                height: 56,
+                child: ElevatedButton.icon(
+                  onPressed: _isSubmitting ? null : _submitCollection,
+                  icon: _isSubmitting
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            valueColor: AlwaysStoppedAnimation<Color>(
+                              Colors.white,
+                            ),
+                          ),
+                        )
+                      : const Icon(
+                          Icons.check_circle,
+                          color: Colors.white,
+                          size: 24,
+                        ),
+                  label: Text(
+                    _isSubmitting ? 'Saving Collection...' : 'Save Collection',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.green.shade700,
+                    foregroundColor: Colors.white,
+                    disabledBackgroundColor: Colors.grey.shade400,
+                    elevation: 4,
+                    shadowColor: Colors.green.withOpacity(0.5),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
                   ),
                 ),
               ),
+              const SizedBox(height: 20),
             ],
           ],
         ),
@@ -443,55 +853,141 @@ Future<void> searchFarmer(String memberNo) async {
 
   Widget _buildFarmerCard() {
     final f = farmer ?? {};
+
     final fname = f['fname'] ?? '';
     final lname = f['lname'] ?? '';
     final farmerId = f['farmerID'] ?? f['farmer_id'] ?? 'N/A';
-    final center = f['center_name'] ?? 'N/A';
-    final contact = f['contact1'] ?? 'N/A';
+    // Improved center name extraction: handle both keys and empty values
+    String center = '';
+    if ((f['center_name'] ?? '').toString().trim().isNotEmpty) {
+      center = f['center_name'].toString().trim();
+    } else if ((f['centerName'] ?? '').toString().trim().isNotEmpty) {
+      center = f['centerName'].toString().trim();
+    } else if ((f['center'] ?? '').toString().trim().isNotEmpty) {
+      center = f['center'].toString().trim();
+    } else {
+      center = 'N/A';
+    }
+    final contact = f['contact1'] ?? f['contact'] ?? 'N/A';
 
-    return Center(
-      child: SizedBox(
-        width: MediaQuery.of(context).size.width * 0.75,
-        child: Card(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          elevation: 4,
-          shadowColor: Colors.green.shade200,
-          color: Colors.green.shade50,
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+    return Container(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [Colors.green.shade700, Colors.green.shade500],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.green.withOpacity(0.3),
+            blurRadius: 15,
+            offset: const Offset(0, 6),
+          ),
+        ],
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          children: [
+            Row(
               children: [
-                Text(
-                  '$fname $lname',
-                  style: const TextStyle(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 18,
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.2),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(
+                    Icons.person,
+                    color: Colors.white,
+                    size: 32,
                   ),
                 ),
-                Text("Member No.: $farmerId"),
-                Text("Center: $center"),
-                Text("Phone: $contact"),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '$fname $lname',
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 20,
+                          color: Colors.white,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        'Member #$farmerId',
+                        style: TextStyle(
+                          fontSize: 14,
+                          color: Colors.white.withOpacity(0.9),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ],
             ),
-          ),
+            const SizedBox(height: 16),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.15),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Column(
+                children: [
+                  _buildFarmerInfo(Icons.business, 'Center', center),
+                  const Divider(color: Colors.white30, height: 16),
+                  _buildFarmerInfo(Icons.phone, 'Contact', contact),
+                ],
+              ),
+            ),
+          ],
         ),
       ),
     );
   }
 
   Widget _buildDateField() {
-    return TextField(
-      readOnly: true,
-      controller: TextEditingController(
-          text: DateFormat('yyyy-MM-dd').format(selectedDate)),
-      decoration: InputDecoration(
-        labelText: 'Collection Date',
-        suffixIcon: IconButton(
-          icon: const Icon(Icons.calendar_today),
-          onPressed: _pickDate,
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.grey.withOpacity(0.1),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: TextField(
+        readOnly: true,
+        controller: TextEditingController(
+          text: DateFormat('EEEE, MMM dd, yyyy').format(selectedDate),
         ),
-        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+        style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+        decoration: InputDecoration(
+          labelText: 'Collection Date',
+          prefixIcon: Icon(Icons.calendar_today, color: Colors.green.shade700),
+          suffixIcon: IconButton(
+            icon: Icon(Icons.edit_calendar, color: Colors.green.shade700),
+            onPressed: _pickDate,
+          ),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(16),
+            borderSide: BorderSide.none,
+          ),
+          filled: true,
+          fillColor: Colors.grey.shade50,
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 20,
+            vertical: 16,
+          ),
+        ),
       ),
     );
   }
@@ -509,22 +1005,54 @@ Future<void> searchFarmer(String memberNo) async {
   //   );
   // }
 
-  Widget _buildInput(TextEditingController controller, String label, {bool error = false}) {
-  return TextField(
-    controller: controller,
-    decoration: InputDecoration(
-      labelText: label,
-      border: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
+  Widget _buildInput(
+    TextEditingController controller,
+    String label, {
+    bool error = false,
+    IconData? icon,
+  }) {
+    return TextField(
+      controller: controller,
+      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+      decoration: InputDecoration(
+        labelText: label,
+        prefixIcon: icon != null
+            ? Icon(
+                icon,
+                color: error ? Colors.red : Colors.green.shade700,
+                size: 20,
+              )
+            : null,
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide(
+            color: error ? Colors.red : Colors.green.shade300,
+          ),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide(
+            color: error ? Colors.red.shade300 : Colors.grey.shade300,
+          ),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide(
+            color: error ? Colors.red : Colors.green.shade700,
+            width: 2,
+          ),
+        ),
+        fillColor: error ? Colors.red.shade50 : Colors.green.shade50,
+        filled: true,
+        errorText: error ? 'Required: Must be > 0' : null,
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 16,
+          vertical: 14,
+        ),
       ),
-      fillColor: Colors.green.shade50,
-      filled: true,
-      errorText: error ? 'Value must be > 0' : null,
-    ),
-    keyboardType: TextInputType.number,
-  );
-}
-
+      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+    );
+  }
 
   Widget _buildTotalField(double value) {
     return TextFormField(
@@ -545,23 +1073,93 @@ Future<void> searchFarmer(String memberNo) async {
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         gradient: LinearGradient(
-          colors: [color.withOpacity(0.7), color],
+          colors: [color.withOpacity(0.8), color],
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
         ),
         borderRadius: BorderRadius.circular(16),
-        boxShadow: [BoxShadow(color: color.withOpacity(0.4), blurRadius: 8, offset: const Offset(0,4))],
-      ),
-      child: Column(
-        children: [
-          Text(label, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-          TweenAnimationBuilder<double>(
-            tween: Tween<double>(begin: 0, end: value),
-            duration: const Duration(milliseconds: 600),
-            builder: (context, val, child) => Text(val.toStringAsFixed(2), style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+        boxShadow: [
+          BoxShadow(
+            color: color.withOpacity(0.3),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
           ),
         ],
       ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: TextStyle(
+              color: Colors.white.withOpacity(0.9),
+              fontWeight: FontWeight.w600,
+              fontSize: 13,
+            ),
+          ),
+          const SizedBox(height: 8),
+          TweenAnimationBuilder<double>(
+            tween: Tween<double>(begin: 0, end: value),
+            duration: const Duration(milliseconds: 600),
+            builder: (context, val, child) => Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(
+                  val.toStringAsFixed(1),
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 24,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(width: 4),
+                const Padding(
+                  padding: EdgeInsets.only(bottom: 4),
+                  child: Text(
+                    'L',
+                    style: TextStyle(
+                      color: Colors.white70,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFarmerInfo(IconData icon, String label, String value) {
+    return Row(
+      children: [
+        Icon(icon, color: Colors.white70, size: 18),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                label,
+                style: TextStyle(
+                  color: Colors.white.withOpacity(0.7),
+                  fontSize: 12,
+                ),
+              ),
+              Text(
+                value,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }
