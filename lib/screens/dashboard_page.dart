@@ -9,12 +9,15 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:intl/intl.dart';
 import 'package:http/http.dart' as http;
 import 'package:fluttertoast/fluttertoast.dart';
+import 'package:provider/provider.dart';
 
 import '../config/app_config.dart';
 import '../models/farmer.dart';
 import '../models/milk_collection.dart';
 import '../services/sync_service.dart';
 import '../services/farmer_service.dart';
+import '../utils/theme_provider.dart';
+import '../widgets/shimmer_loading.dart';
 import 'login_page.dart';
 import 'profile_page.dart';
 import 'printer_settings_page.dart';
@@ -165,6 +168,96 @@ class _DashboardPageState extends State<DashboardPage>
     return prefs.getInt('tenant_id');
   }
 
+  /// Debug function: Check Hive data and API status
+  /// Call this to verify milk collections were downloaded successfully
+  Future<void> _debugCheckData() async {
+    try {
+      print('\n🔍 ═══════════════════════════════════════════════════════');
+      print('📊 HIVE & API DEBUG CHECK');
+      print('═══════════════════════════════════════════════════════');
+
+      // Check SharedPreferences
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString('token');
+      final tenantId = prefs.getInt('tenant_id');
+      print('\n✅ SharedPreferences Status:');
+      print(
+        '   Token: ${token != null ? '✓ Exists (${token.length} chars)' : '✗ Missing'}',
+      );
+      print('   Tenant ID: ${tenantId ?? '✗ Missing'}');
+
+      // Check Hive farmers
+      final farmerBox = Hive.box<Farmer>('farmers');
+      print('\n✅ Farmers Hive:');
+      print('   Total records: ${farmerBox.length}');
+      if (farmerBox.isNotEmpty) {
+        final f = farmerBox.values.first;
+        print('   Sample: ${f.fname} ${f.lname} (ID: ${f.farmerId})');
+      }
+
+      // Check Hive milk collections
+      final milkBox = Hive.box<MilkCollection>('milk_collections');
+      print('\n✅ Milk Collections Hive:');
+      print('   Total records: ${milkBox.length}');
+      if (milkBox.isEmpty) {
+        print('   ⚠️  WARNING: Hive is EMPTY!');
+        print('   → This is why totals show 0');
+        print('   → Check: 1) API endpoint 2) Database records 3) Tenant ID');
+      } else {
+        final synced = milkBox.values.where((m) => m.isSynced).length;
+        final unsynced = milkBox.values.where((m) => !m.isSynced).length;
+        print('   Synced: $synced, Unsynced: $unsynced');
+
+        // Show sample records
+        print('   📋 Latest 3 records:');
+        final sorted = milkBox.values.toList()
+          ..sort((a, b) => b.date.compareTo(a.date));
+        for (var i = 0; i < sorted.length.clamp(0, 3); i++) {
+          final m = sorted[i];
+          print(
+            '     [$i] ${m.date}: Farmer ${m.farmerId}, '
+            '${m.morning}L + ${m.evening}L - ${m.rejected}L = ${m.morning + m.evening - m.rejected}L',
+          );
+        }
+      }
+
+      // Test API endpoint (if token exists)
+      if (token != null && tenantId != null) {
+        print('\n✅ Testing API Endpoint:');
+        try {
+          final apiBase = "${AppConfig.baseUrl}/api";
+          final url = Uri.parse(
+            "$apiBase/milk-collections-sync?tenant_id=$tenantId&limit=5",
+          );
+          print('   URL: $url');
+
+          final response = await http
+              .get(url, headers: {'Authorization': 'Bearer $token'})
+              .timeout(const Duration(seconds: 5));
+
+          print('   Status: ${response.statusCode}');
+          if (response.statusCode == 200) {
+            final data = json.decode(response.body);
+            final count = (data['data'] as List?)?.length ?? 0;
+            print('   ✅ API Response: $count records returned');
+            if (count == 0) {
+              print('   ⚠️  API returned empty data - check database records');
+            }
+          } else {
+            print('   ❌ API Error: ${response.statusCode}');
+            print('   Response: ${response.body.substring(0, 200)}...');
+          }
+        } catch (e) {
+          print('   ❌ API Test Failed: $e');
+        }
+      }
+
+      print('═══════════════════════════════════════════════════════\n');
+    } catch (e) {
+      print('❌ Debug check error: $e');
+    }
+  }
+
   DateTime _parseMonth(dynamic monthValue) {
     if (monthValue == null) return DateTime.now();
     final str = monthValue.toString().trim();
@@ -177,8 +270,9 @@ class _DashboardPageState extends State<DashboardPage>
     }
 
     final m = int.tryParse(str);
-    if (m != null && m >= 1 && m <= 12)
+    if (m != null && m >= 1 && m <= 12) {
       return DateTime(DateTime.now().year, m, 1);
+    }
 
     try {
       return DateTime.parse(str);
@@ -316,101 +410,112 @@ class _DashboardPageState extends State<DashboardPage>
   @override
   Widget build(BuildContext context) {
     final screenWidth = MediaQuery.of(context).size.width;
+    final themeProvider = Provider.of<ThemeProvider>(context);
 
     return Scaffold(
-      backgroundColor: const Color(0xFFF6F9FC),
       appBar: AppBar(
         title: const Text('Dashboard'),
         backgroundColor: Colors.green.shade700,
         elevation: 2,
         actions: [
+          IconButton(
+            onPressed: () => themeProvider.toggleTheme(),
+            icon: Icon(
+              themeProvider.isDarkMode ? Icons.light_mode : Icons.dark_mode,
+            ),
+            tooltip: 'Toggle Theme',
+          ),
           IconButton(onPressed: _logout, icon: const Icon(Icons.logout)),
         ],
       ),
       drawer: _buildDrawer(),
       body: isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : SingleChildScrollView(
-              padding: const EdgeInsets.only(bottom: 16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _buildGreetingRow(screenWidth),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    child: Wrap(
-                      spacing: 12,
-                      runSpacing: 12,
-                      children: [
-                        _buildStatCard(
-                          'Total Milk',
-                          '${dailyData.fold<double>(0, (p, c) => p + ((c['total_milk'] ?? c['total'] ?? 0) * 1.0)).toStringAsFixed(2)} L',
-                          Icons.local_drink,
-                          Colors.green,
-                          width: (screenWidth - 48) / 2,
-                        ),
-                        _buildStatCard(
-                          'Collections',
-                          '${dailyData.length}',
-                          Icons.add,
-                          Colors.orange,
-                          width: (screenWidth - 48) / 2,
-                        ),
-                        _buildStatCard(
-                          'Direct',
-                          '${(dailyData.length / 2).ceil()}',
-                          Icons.send,
-                          Colors.blue,
-                          width: (screenWidth - 48) / 2,
-                        ),
-                        _buildStatCard(
-                          'Farmers',
-                          '$totalFarmers',
-                          Icons.people,
-                          Colors.purple,
-                          width: (screenWidth - 48) / 2,
-                        ),
-                        _buildStatCard(
-                          'Unsynced',
-                          '$unsyncedCollections',
-                          Icons.sync,
-                          Colors.red,
-                          width: (screenWidth - 48) / 2,
-                        ),
-                        GestureDetector(
-                          onTap: _syncNow,
-                          child: _buildStatCard(
-                            'Sync Now',
-                            'Tap to sync',
-                            Icons.cloud_upload,
-                            Colors.teal,
+          ? const ShimmerCardGrid()
+          : RefreshIndicator(
+              onRefresh: () async {
+                await fetchDashboardData(range: selectedRange);
+                await _loadSyncStats();
+              },
+              child: SingleChildScrollView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                padding: const EdgeInsets.only(bottom: 16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _buildGreetingRow(screenWidth),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: Wrap(
+                        spacing: 12,
+                        runSpacing: 12,
+                        children: [
+                          _buildStatCard(
+                            'Total Milk',
+                            '${dailyData.fold<double>(0, (p, c) => p + ((c['total_milk'] ?? c['total'] ?? 0) * 1.0)).toStringAsFixed(0)} L',
+                            Icons.local_drink,
+                            Colors.green,
                             width: (screenWidth - 48) / 2,
                           ),
-                        ),
-                      ],
+                          _buildStatCard(
+                            'Collections',
+                            '${dailyData.length}',
+                            Icons.add,
+                            Colors.orange,
+                            width: (screenWidth - 48) / 2,
+                          ),
+                          _buildStatCard(
+                            'Direct',
+                            '${(dailyData.length / 2).ceil()}',
+                            Icons.send,
+                            Colors.blue,
+                            width: (screenWidth - 48) / 2,
+                          ),
+                          _buildStatCard(
+                            'Farmers',
+                            '$totalFarmers',
+                            Icons.people,
+                            Colors.purple,
+                            width: (screenWidth - 48) / 2,
+                          ),
+                          _buildStatCard(
+                            'Unsynced',
+                            '$unsyncedCollections',
+                            Icons.sync,
+                            Colors.red,
+                            width: (screenWidth - 48) / 2,
+                          ),
+                          GestureDetector(
+                            onTap: _syncNow,
+                            child: _buildStatCard(
+                              'Sync Now',
+                              'Tap to sync',
+                              Icons.cloud_upload,
+                              Colors.teal,
+                              width: (screenWidth - 48) / 2,
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 24),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    child: Column(
-                      children: [
-                        _buildMonthlyLineChart(),
-                        const SizedBox(height: 20),
-                        _buildDailyBarChart(),
-                        const SizedBox(height: 20),
-                        _buildMilkPieChart(),
-                      ],
+                    const SizedBox(height: 24),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: Column(
+                        children: [
+                          _buildMonthlyLineChart(),
+                          const SizedBox(height: 20),
+                          _buildDailyBarChart(),
+                          const SizedBox(height: 20),
+                          _buildMilkPieChart(),
+                        ],
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
     );
   }
-
-  // --- remaining widgets (_buildDrawer, _buildStatCard, charts, etc.) ---
-  // Keep your existing implementations as they are. Only the timer, fetchDashboardData, and _loadSyncStats are modified.
 
   Widget _buildGreetingRow(double screenWidth) {
     return Padding(
@@ -512,7 +617,20 @@ class _DashboardPageState extends State<DashboardPage>
                       null,
                       isPrinter: true,
                     ),
-                    const Divider(height: 1, thickness: 1),
+                    Opacity(
+                      opacity: 0.0,
+                      child: Column(
+                        children: [
+                          const Divider(height: 1, thickness: 1),
+                          _drawerTile(
+                            Icons.bug_report,
+                            'Debug: Check Data',
+                            null,
+                            isDebug: true,
+                          ),
+                        ],
+                      ),
+                    ),
                     _drawerTile(Icons.logout, 'Logout', null, isLogout: true),
                   ],
                 ),
@@ -530,12 +648,17 @@ class _DashboardPageState extends State<DashboardPage>
     String? route, {
     bool isPrinter = false,
     bool isLogout = false,
+    bool isDebug = false,
   }) {
     return ListTile(
       contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 5),
       leading: Icon(
         icon,
-        color: isLogout ? Colors.red : const Color(0xFF2E7D32),
+        color: isLogout
+            ? Colors.red
+            : isDebug
+            ? Colors.orange
+            : const Color(0xFF2E7D32),
         size: 26,
       ),
       title: Text(
@@ -543,7 +666,11 @@ class _DashboardPageState extends State<DashboardPage>
         style: TextStyle(
           fontSize: 16,
           fontWeight: FontWeight.w500,
-          color: isLogout ? Colors.red : Colors.black87,
+          color: isLogout
+              ? Colors.red
+              : isDebug
+              ? Colors.orange
+              : Colors.black87,
         ),
       ),
       onTap: () async {
@@ -551,6 +678,16 @@ class _DashboardPageState extends State<DashboardPage>
 
         if (isLogout) {
           _logout();
+          return;
+        }
+
+        if (isDebug) {
+          await _debugCheckData();
+          Fluttertoast.showToast(
+            msg: "Check console logs for debug info",
+            backgroundColor: Colors.orange,
+            toastLength: Toast.LENGTH_LONG,
+          );
           return;
         }
 
@@ -754,8 +891,9 @@ class _DashboardPageState extends State<DashboardPage>
                         reservedSize: 36,
                         getTitlesWidget: (value, meta) {
                           final idx = value.toInt();
-                          if (idx < 0 || idx >= dailyData.length)
+                          if (idx < 0 || idx >= dailyData.length) {
                             return const Text('');
+                          }
                           final raw = dailyData[idx]['date']?.toString() ?? '';
                           try {
                             final d = DateTime.parse(raw);
@@ -861,8 +999,9 @@ class _DashboardPageState extends State<DashboardPage>
                         reservedSize: 42,
                         getTitlesWidget: (value, meta) {
                           final idx = value.toInt();
-                          if (idx < 0 || idx >= monthLabels.length)
+                          if (idx < 0 || idx >= monthLabels.length) {
                             return const Text('');
+                          }
                           return Text(
                             monthLabels[idx],
                             style: const TextStyle(fontSize: 10),

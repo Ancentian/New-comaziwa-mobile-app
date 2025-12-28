@@ -354,8 +354,35 @@ class _MilkListPageState extends State<MilkListPage>
       double monthlyTotal = 0;
       double yearlyTotal = 0;
 
-      // Fetch server totals
-      if (token != null && tenantId != null) {
+      // Get ALL collections (both synced and unsynced) from local storage
+      final box = Hive.box<MilkCollection>('milk_collections');
+      for (var record in box.values) {
+        if (record.farmerId == farmerId) {
+          final recordDate = DateTime.tryParse(record.date);
+          if (recordDate != null && recordDate.year == currentYear) {
+            final recordTotal =
+                record.morning + record.evening - record.rejected;
+
+            // Today's total
+            if (DateFormat('yyyy-MM-dd').format(recordDate) == todayStr) {
+              todayTotal += recordTotal;
+            }
+
+            // Monthly total
+            if (recordDate.month == currentMonth) {
+              monthlyTotal += recordTotal;
+            }
+
+            // Yearly total
+            yearlyTotal += recordTotal;
+          }
+        }
+      }
+
+      // Also try to fetch server totals and use them if local data is empty
+      if (token != null &&
+          tenantId != null &&
+          (todayTotal == 0 && monthlyTotal == 0)) {
         try {
           final res = await http.get(
             Uri.parse("$apiBase/find-farmer/$farmerId?tenant_id=$tenantId"),
@@ -364,37 +391,19 @@ class _MilkListPageState extends State<MilkListPage>
 
           if (res.statusCode == 200) {
             final data = json.decode(res.body);
-            todayTotal = (data['todays_total'] ?? 0).toDouble();
-            monthlyTotal = (data['monthly_total'] ?? 0).toDouble();
-            yearlyTotal = (data['yearly_total'] ?? 0).toDouble();
+            // Use server totals only if we have no local data
+            if (todayTotal == 0) {
+              todayTotal = (data['todays_total'] ?? 0).toDouble();
+            }
+            if (monthlyTotal == 0) {
+              monthlyTotal = (data['monthly_total'] ?? 0).toDouble();
+            }
+            if (yearlyTotal == 0) {
+              yearlyTotal = (data['yearly_total'] ?? 0).toDouble();
+            }
           }
         } catch (e) {
           print("⚠️ Could not fetch from API: $e");
-        }
-      }
-
-      // Add only unsynced (offline) collections to server totals
-      final box = Hive.box<MilkCollection>('milk_collections');
-      for (var record in box.values) {
-        if (record.farmerId == farmerId && !record.isSynced) {
-          final recordDate = DateTime.tryParse(record.date);
-          if (recordDate != null && recordDate.year == currentYear) {
-            final recordTotal =
-                record.morning + record.evening - record.rejected;
-
-            // Today's additions
-            if (DateFormat('yyyy-MM-dd').format(recordDate) == todayStr) {
-              todayTotal += recordTotal;
-            }
-
-            // Monthly additions
-            if (recordDate.month == currentMonth) {
-              monthlyTotal += recordTotal;
-            }
-
-            // Yearly additions
-            yearlyTotal += recordTotal;
-          }
         }
       }
 
@@ -409,9 +418,9 @@ class _MilkListPageState extends State<MilkListPage>
       enrichedItem['yearly_total'] = yearlyTotal.toStringAsFixed(2);
       enrichedItem['company_name'] = companyName;
 
-      final receiptWidget = ReceiptBuilder.milkReceipt(enrichedItem);
-      final ok = await PrinterService.printWithRetry(
-        receiptWidget,
+      // Use direct print method for better reliability
+      final ok = await PrinterService.printWithData(
+        enrichedItem,
         context,
         retries: 2,
       );
@@ -494,8 +503,9 @@ class _MilkListPageState extends State<MilkListPage>
                           if (hiveKey != null) {
                             bool success = await syncSingleCollection(hiveKey);
                             if (!success) allSuccess = false;
-                            if (success)
+                            if (success) {
                               setState(() => item['is_synced'] = true);
+                            }
                           }
                         }
 

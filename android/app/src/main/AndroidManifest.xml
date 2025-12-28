@@ -1,8 +1,28 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    
+    <!-- ✅ INTERNET PERMISSION - CRITICAL FOR RELEASE BUILDS -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    
+    <!-- Bluetooth permissions for printer -->
+    <!-- Legacy Bluetooth permissions for Android < 12 -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30"/>
+    
+    <!-- Bluetooth permissions for Android 12+ (API 31+) -->
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
+    
+    <!-- Fine location required for Bluetooth discovery on Android 12+ -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30"/>
+    
     <application
-        android:label="comaziwa"
+        android:label="Comaziwa"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:enableOnBackInvokedCallback="true">
         <activity
             android:name=".MainActivity"
             android:exported="true"

@@ -7,6 +7,7 @@ import 'dart:convert';
 import 'dart:async';
 import 'package:intl/intl.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// Centralized Printer Service
 /// Handles all printing operations including auto-print functionality
@@ -18,8 +19,10 @@ class PrinterService {
   /// Returns true if everything is ready, false otherwise
   static Future<bool> checkBluetoothConnection(BuildContext context) async {
     try {
+      print('🔍 Checking Bluetooth connection...');
       // Check Bluetooth permission
       final btStatus = await Permission.bluetoothConnect.status;
+      print('📱 Bluetooth Connect Status: $btStatus');
       if (btStatus.isDenied || btStatus.isPermanentlyDenied) {
         final result = await showDialog<bool>(
           context: context,
@@ -59,12 +62,28 @@ class PrinterService {
       }
 
       // Check Bluetooth scan permission (Android 12+)
-      if (await Permission.bluetoothScan.isDenied) {
+      final scanStatus = await Permission.bluetoothScan.status;
+      if (scanStatus.isDenied) {
         await Permission.bluetoothScan.request();
+      }
+
+      // Check location permission (required for Bluetooth on Android < 12)
+      final locationStatus = await Permission.location.status;
+      if (locationStatus.isDenied) {
+        print('📍 Requesting location permission for Bluetooth...');
+        await Permission.location.request();
+      }
+
+      // Load saved printer address if available
+      if (_printerAddress == null) {
+        final prefs = await SharedPreferences.getInstance();
+        _printerAddress = prefs.getString('selected_printer');
+        print('📋 Loaded saved printer: $_printerAddress');
       }
 
       // Check if printer is selected
       if (_printerAddress == null && !AutoPrintService.isAutoPrintEnabled()) {
+        print('⚠️ No printer selected');
         final result = await showDialog<bool>(
           context: context,
           builder: (ctx) => AlertDialog(
@@ -212,9 +231,38 @@ class PrinterService {
       Uint8List.fromList(List.filled(n, 0x0A));
   static Uint8List escAlignCenter() => Uint8List.fromList([0x1B, 0x61, 0x01]);
   static Uint8List escAlignLeft() => Uint8List.fromList([0x1B, 0x61, 0x00]);
+  static Uint8List escAlignRight() => Uint8List.fromList([0x1B, 0x61, 0x02]);
   static Uint8List escBoldOn() => Uint8List.fromList([0x1B, 0x45, 0x01]);
   static Uint8List escBoldOff() => Uint8List.fromList([0x1B, 0x45, 0x00]);
   static Uint8List escCut() => Uint8List.fromList([0x1D, 0x56, 0x00]);
+
+  // Font and character set
+  static Uint8List escSelectCP437() =>
+      Uint8List.fromList([0x1B, 0x74, 0x00]); // CP437 USA
+  static Uint8List escFontA() =>
+      Uint8List.fromList([0x1B, 0x4D, 0x00]); // Font A (12x24)
+  static Uint8List escFontB() =>
+      Uint8List.fromList([0x1B, 0x4D, 0x01]); // Font B (9x17)
+
+  // Character size (GS ! n) - width and height multipliers
+  static Uint8List escNormalSize() =>
+      Uint8List.fromList([0x1D, 0x21, 0x00]); // Normal
+  static Uint8List escDoubleHeight() =>
+      Uint8List.fromList([0x1D, 0x21, 0x01]); // 2x height
+  static Uint8List escDoubleWidth() =>
+      Uint8List.fromList([0x1D, 0x21, 0x10]); // 2x width
+  static Uint8List escDoubleSize() =>
+      Uint8List.fromList([0x1D, 0x21, 0x11]); // 2x both
+  static Uint8List escLargeText() =>
+      Uint8List.fromList([0x1D, 0x21, 0x22]); // 3x height, 3x width
+
+  // Line drawing
+  static Uint8List escSingleLine() =>
+      _bytesFromString('--------------------------------\n');
+  static Uint8List escDoubleLine() =>
+      _bytesFromString('================================\n');
+  static Uint8List escDashedLine() =>
+      _bytesFromString('- - - - - - - - - - - - - - - - \n');
 
   static Uint8List _bytesFromString(String s) {
     return Uint8List.fromList(latin1.encode(s));
@@ -236,6 +284,296 @@ class PrinterService {
     out.addAll(escNewLine(3));
     out.addAll(escCut());
     return Uint8List.fromList(out);
+  }
+
+  /// Test if printer is reachable by sending a small test command
+  static Future<bool> testPrinterConnection(String address) async {
+    try {
+      print('🔌 Testing connection to: $address');
+      // Normalize MAC address format
+      final normalizedAddress = _normalizeMacAddress(address);
+      print('🔄 Normalized address: $normalizedAddress');
+
+      // Send minimal ESC/POS init command
+      final testBytes = Uint8List.fromList([0x1B, 0x40]); // ESC @
+
+      final success = await FlutterBluetoothPrinter.printBytes(
+        address: normalizedAddress,
+        data: testBytes,
+        keepConnected: false,
+        maxBufferSize: 64,
+        delayTime: 100,
+      );
+
+      if (success) {
+        print('✅ Printer connection test successful');
+      } else {
+        print('❌ Printer connection test failed');
+      }
+
+      return success;
+    } catch (e) {
+      print('❌ Printer connection test error: $e');
+      return false;
+    }
+  }
+
+  /// Direct print using ESC/POS commands - more reliable
+  static Future<bool> printDirectly(
+    Map<String, dynamic> receiptData,
+    BuildContext context,
+  ) async {
+    print('🖨️ Starting direct print job...');
+
+    try {
+      // Check Bluetooth and printer connection first
+      final isReady = await checkBluetoothConnection(context);
+      if (!isReady) {
+        print('❌ Bluetooth connection not ready');
+        return false;
+      }
+
+      // Ensure we have a printer address
+      if (AutoPrintService.isAutoPrintEnabled()) {
+        final printerAddress = AutoPrintService.getDefaultPrinterAddress();
+        if (printerAddress != null) {
+          _printerAddress = _normalizeMacAddress(printerAddress);
+          print('📋 Using auto-print address: $_printerAddress');
+        }
+      }
+
+      if (_printerAddress == null) {
+        print('⚠️ No printer address, prompting selection...');
+        final ok = await selectPrinter(context);
+        if (!ok) return false;
+      }
+
+      print('🎯 Printer address: $_printerAddress');
+
+      // Test printer connection first
+      final connectionOk = await testPrinterConnection(_printerAddress!);
+      if (!connectionOk) {
+        Fluttertoast.showToast(
+          msg:
+              'Cannot connect to printer. Check if it\'s powered on and in range.',
+          backgroundColor: Colors.orange,
+          toastLength: Toast.LENGTH_LONG,
+        );
+        return false;
+      }
+
+      print('📝 Building receipt data...');
+
+      // Build ESC/POS receipt
+      final bytes = buildMilkReceiptEscPos(receiptData);
+      print('📤 Sending ${bytes.length} bytes to printer: $_printerAddress');
+
+      // Send to printer using static API with proper buffer settings
+      final success = await FlutterBluetoothPrinter.printBytes(
+        address: _printerAddress!,
+        data: bytes,
+        keepConnected: false,
+        maxBufferSize: 1024, // Larger buffer for faster transmission
+        delayTime: 120, // Delay between chunks in milliseconds
+      );
+
+      if (!success) {
+        throw Exception('printBytes returned false');
+      }
+
+      print('⏳ Waiting for transmission...');
+      await Future.delayed(const Duration(milliseconds: 1500));
+
+      print('✅ Print completed successfully');
+      Fluttertoast.showToast(
+        msg: 'Receipt printed successfully',
+        backgroundColor: Colors.green,
+      );
+      return true;
+    } catch (e) {
+      print('❌ Direct print error: $e');
+      Fluttertoast.showToast(
+        msg: 'Print failed: ${e.toString()}',
+        backgroundColor: Colors.red,
+        toastLength: Toast.LENGTH_LONG,
+      );
+      return false;
+    }
+  }
+
+  /// Build ESC/POS receipt for milk collection with enhanced design
+  static Uint8List buildMilkReceiptEscPos(Map<String, dynamic> data) {
+    final out = <int>[];
+
+    // Initialize printer with CP437 codepage and Font A (12x24)
+    out.addAll(escInit());
+    out.addAll(escSelectCP437());
+    out.addAll(escFontA());
+    out.addAll(escNormalSize());
+    out.addAll(escNewLine(1));
+
+    // ============ HEADER ============
+    out.addAll(escAlignCenter());
+    out.addAll(escDoubleHeight());
+    out.addAll(escBoldOn());
+    out.addAll(_bytesFromString('MILK COLLECTION\n'));
+    out.addAll(_bytesFromString('RECEIPT\n'));
+    out.addAll(escBoldOff());
+    out.addAll(escNormalSize());
+    out.addAll(escNewLine(1));
+
+    // Company Name
+    if (data['company_name'] != null) {
+      out.addAll(escDoubleWidth());
+      out.addAll(escBoldOn());
+      out.addAll(_bytesFromString('${data['company_name']}\n'));
+      out.addAll(escBoldOff());
+      out.addAll(escNormalSize());
+    }
+
+    // Address & Contact
+    out.addAll(_bytesFromString('P.O BOX 297-60100\n'));
+    out.addAll(_bytesFromString('EMBU, KENYA\n'));
+    out.addAll(_bytesFromString('Tel: 0743935667\n'));
+    out.addAll(escNewLine(1));
+    out.addAll(escDoubleLine());
+
+    // ============ FARMER INFO ============
+    out.addAll(escAlignLeft());
+    out.addAll(escBoldOn());
+    out.addAll(
+      _bytesFromString('Date: ${_formatDate(data['collection_date'])}\n'),
+    );
+    out.addAll(escBoldOff());
+    out.addAll(_bytesFromString('Center: ${data['center_name'] ?? 'N/A'}\n'));
+    out.addAll(escNewLine(1));
+
+    // Farmer Name (larger)
+    out.addAll(escDoubleHeight());
+    out.addAll(escBoldOn());
+    out.addAll(
+      _bytesFromString('${data['fname'] ?? ''} ${data['lname'] ?? ''}\n'),
+    );
+    out.addAll(escBoldOff());
+    out.addAll(escNormalSize());
+
+    out.addAll(_bytesFromString('Member No: ${data['farmerID'] ?? 'N/A'}\n'));
+    out.addAll(escNewLine(1));
+    out.addAll(escSingleLine());
+
+    // ============ COLLECTION DETAILS ============
+    out.addAll(escAlignCenter());
+    out.addAll(escBoldOn());
+    out.addAll(_bytesFromString('COLLECTION DETAILS\n'));
+    out.addAll(escBoldOff());
+    out.addAll(escAlignLeft());
+    out.addAll(escNewLine(1));
+
+    // Format as table
+    out.addAll(
+      _bytesFromString(
+        'Morning Milk:        ${_padRight(data['morning']?.toString() ?? '0', 6)} L\n',
+      ),
+    );
+    out.addAll(
+      _bytesFromString(
+        'Evening Milk:        ${_padRight(data['evening']?.toString() ?? '0', 6)} L\n',
+      ),
+    );
+    out.addAll(
+      _bytesFromString(
+        'Rejected:            ${_padRight(data['rejected']?.toString() ?? '0', 6)} L\n',
+      ),
+    );
+    out.addAll(escDashedLine());
+
+    // Total (emphasized)
+    out.addAll(escDoubleHeight());
+    out.addAll(escBoldOn());
+    final total =
+        ((data['morning'] ?? 0) +
+        (data['evening'] ?? 0) -
+        (data['rejected'] ?? 0));
+    out.addAll(_bytesFromString('TOTAL: ${total.toStringAsFixed(1)} L\n'));
+    out.addAll(escBoldOff());
+    out.addAll(escNormalSize());
+    out.addAll(escNewLine(1));
+    out.addAll(escDoubleLine());
+
+    // ============ SUMMARY ============
+    out.addAll(escAlignCenter());
+    out.addAll(escBoldOn());
+    out.addAll(escDoubleWidth());
+    out.addAll(_bytesFromString('SUMMARY\n'));
+    out.addAll(escBoldOff());
+    out.addAll(escNormalSize());
+    out.addAll(escAlignLeft());
+    out.addAll(escNewLine(1));
+
+    out.addAll(escBoldOn());
+    out.addAll(
+      _bytesFromString(
+        'Today\'s Total:      ${_padRight(data['today_total']?.toString() ?? data['total']?.toString() ?? '0', 7)} L\n',
+      ),
+    );
+    out.addAll(
+      _bytesFromString(
+        'Monthly Total:      ${_padRight(data['monthly_total']?.toString() ?? '0', 7)} L\n',
+      ),
+    );
+    out.addAll(
+      _bytesFromString(
+        'Yearly Total:       ${_padRight(data['yearly_total']?.toString() ?? '0', 7)} L\n',
+      ),
+    );
+    out.addAll(escBoldOff());
+    out.addAll(escNewLine(1));
+    out.addAll(escDoubleLine());
+
+    // ============ FOOTER ============
+    out.addAll(escAlignCenter());
+    out.addAll(escNewLine(1));
+    out.addAll(escDoubleHeight());
+    out.addAll(escBoldOn());
+    out.addAll(_bytesFromString('Dairy Cow,\n'));
+    out.addAll(_bytesFromString('Daily Wealth!\n'));
+    out.addAll(escBoldOff());
+    out.addAll(escNormalSize());
+    out.addAll(escNewLine(1));
+
+    // Thank you message
+    out.addAll(_bytesFromString('Thank you for your business\n'));
+    out.addAll(escNewLine(1));
+    out.addAll(_bytesFromString('${_formatDateTime(DateTime.now())}\n'));
+
+    // Extra spacing and cut
+    out.addAll(escNewLine(4));
+    out.addAll(escCut());
+
+    return Uint8List.fromList(out);
+  }
+
+  /// Helper to pad right for alignment
+  static String _padRight(String text, int width) {
+    return text.padLeft(width);
+  }
+
+  /// Format date only (no time)
+  static String _formatDate(String? dateString) {
+    if (dateString == null || dateString.isEmpty) {
+      return DateFormat('dd/MM/yyyy').format(DateTime.now());
+    }
+    try {
+      final date = DateTime.parse(dateString);
+      return DateFormat('dd/MM/yyyy').format(date);
+    } catch (e) {
+      return DateFormat('dd/MM/yyyy').format(DateTime.now());
+    }
+  }
+
+  /// Format datetime for footer
+  static String _formatDateTime(DateTime dateTime) {
+    return DateFormat('dd/MM/yyyy HH:mm:ss').format(dateTime);
   }
 
   /// Convenience: print a milk receipt as ESC/POS bytes
@@ -261,11 +599,18 @@ class PrinterService {
     return await printRawBytes(bytes, context);
   }
 
+  /// Normalize MAC address format (hyphens to colons)
+  static String _normalizeMacAddress(String address) {
+    return address.replaceAll('-', ':');
+  }
+
   /// Select printer via dialog
   static Future<bool> selectPrinter(BuildContext context) async {
     try {
+      print('🔍 Opening printer selection dialog...');
       final device = await FlutterBluetoothPrinter.selectDevice(context);
       if (device == null) {
+        print('⚠️ No printer selected');
         Fluttertoast.showToast(
           msg: "No printer selected",
           backgroundColor: Colors.orange,
@@ -340,15 +685,36 @@ class PrinterService {
     Receipt receiptWidget,
     BuildContext context,
   ) async {
-    // Check Bluetooth and printer connection first
-    final isReady = await checkBluetoothConnection(context);
-    if (!isReady) {
-      Fluttertoast.showToast(
-        msg: 'Printing cancelled - connection not ready',
-        backgroundColor: Colors.orange,
-      );
+    print('🖨️ Starting print job...');
+
+    // Fast path: if auto-print is enabled and we have an address, skip full checks
+    if (AutoPrintService.isAutoPrintEnabled()) {
+      final printerAddress = AutoPrintService.getDefaultPrinterAddress();
+      if (printerAddress != null) {
+        _printerAddress = _normalizeMacAddress(printerAddress);
+        print('📋 Fast-print: $_printerAddress');
+      }
+    }
+
+    // Only do full checks if no printer address
+    if (_printerAddress == null) {
+      final isReady = await checkBluetoothConnection(context);
+      if (!isReady) {
+        print('❌ Bluetooth connection not ready');
+        Fluttertoast.showToast(
+          msg: 'Printing cancelled - connection not ready',
+          backgroundColor: Colors.orange,
+        );
+        return false;
+      }
+    }
+
+    if (_printerAddress == null) {
+      print('⚠️ No printer address available');
       return false;
     }
+
+    print('🎯 Printer: $_printerAddress');
 
     // Use a completer to wait for the ReceiptController to be initialized
     final completer = Completer<ReceiptController>();
@@ -357,24 +723,12 @@ class PrinterService {
     final wrappedReceipt = Receipt(
       builder: receiptWidget.builder,
       onInitialized: (controller) {
+        print('✅ Receipt controller initialized');
         _controller = controller;
         receiptWidget.onInitialized(controller);
         if (!completer.isCompleted) completer.complete(controller);
       },
     );
-
-    // Ensure we have a printer address (auto-print or saved)
-    if (AutoPrintService.isAutoPrintEnabled()) {
-      final printerAddress = AutoPrintService.getDefaultPrinterAddress();
-      if (printerAddress != null) {
-        _printerAddress = printerAddress;
-      }
-    }
-
-    if (_printerAddress == null) {
-      final ok = await selectPrinter(context);
-      if (!ok) return false;
-    }
 
     bool result = false;
     OverlayEntry? overlayEntry;
@@ -389,20 +743,20 @@ class PrinterService {
         ),
       );
 
-      // Insert overlay and wait for next frame (faster than arbitrary delay)
+      // Insert overlay and wait for next frame
       Overlay.of(context).insert(overlayEntry);
-      await Future.delayed(const Duration(milliseconds: 100));
+      await Future.delayed(const Duration(milliseconds: 50));
 
       // Wait for controller with shorter timeout
       final controller = await completer.future.timeout(
-        const Duration(milliseconds: 1500),
+        const Duration(milliseconds: 800),
       );
 
       try {
         // Call print without waiting for completion (fire and forget for speed)
         controller.print(address: _printerAddress!);
         // Minimal delay to ensure command is sent
-        await Future.delayed(const Duration(milliseconds: 200));
+        await Future.delayed(const Duration(milliseconds: 100));
         result = true;
       } catch (e) {
         print('Print error: $e');
@@ -484,6 +838,29 @@ class PrinterService {
       } catch (_) {
         attempt++;
         if (attempt > retries) break;
+        await Future.delayed(const Duration(milliseconds: 500));
+      }
+    }
+    return false;
+  }
+
+  /// Print with data map using widget-based printing
+  static Future<bool> printWithData(
+    Map<String, dynamic> receiptData,
+    BuildContext context, {
+    int retries = 2,
+  }) async {
+    int attempt = 0;
+    while (attempt <= retries) {
+      try {
+        final receiptWidget = ReceiptBuilder.milkReceipt(receiptData);
+        final success = await printReceiptWidget(receiptWidget, context);
+        if (success) return true;
+      } catch (e) {
+        print('⚠️ Print attempt ${attempt + 1} failed: $e');
+      }
+      attempt++;
+      if (attempt <= retries) {
         await Future.delayed(const Duration(milliseconds: 500));
       }
     }
@@ -587,9 +964,14 @@ class ReceiptBuilder {
                 ),
               ),
               const SizedBox(height: 16),
-              const Divider(thickness: 2),
+              Center(
+                child: Text(
+                  '================================',
+                  style: const TextStyle(fontSize: 18, fontFamily: 'monospace'),
+                ),
+              ),
               const SizedBox(height: 12),
-              // Date and Time
+              // Farmer Information
               Text(
                 _formatDateTime(data['collection_date']),
                 style: const TextStyle(fontSize: 22, fontFamily: 'monospace'),
@@ -614,7 +996,12 @@ class ReceiptBuilder {
                 style: const TextStyle(fontSize: 22, fontFamily: 'monospace'),
               ),
               const SizedBox(height: 14),
-              const Divider(thickness: 2),
+              Center(
+                child: Text(
+                  '================================',
+                  style: const TextStyle(fontSize: 18, fontFamily: 'monospace'),
+                ),
+              ),
               const SizedBox(height: 10),
               Text(
                 "Morning: ${data['morning']} L",
@@ -631,17 +1018,13 @@ class ReceiptBuilder {
                 style: const TextStyle(fontFamily: 'monospace', fontSize: 28),
               ),
               const SizedBox(height: 14),
-              const Divider(thickness: 2),
+              Center(
+                child: Text(
+                  '================================',
+                  style: const TextStyle(fontSize: 18, fontFamily: 'monospace'),
+                ),
+              ),
               const SizedBox(height: 14),
-              // Text(
-              //   "Current Weight: ${data['total']} L",
-              //   style: const TextStyle(
-              //     fontWeight: FontWeight.bold,
-              //     fontFamily: 'monospace',
-              //     fontSize: 28,
-              //   ),
-              // ),
-              const SizedBox(height: 8),
               Text(
                 "Today's Weight: ${data['today_total'] ?? data['total']} L",
                 style: const TextStyle(
@@ -673,6 +1056,13 @@ class ReceiptBuilder {
               const SizedBox(height: 20),
               Center(
                 child: Text(
+                  '================================',
+                  style: const TextStyle(fontSize: 18, fontFamily: 'monospace'),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Center(
+                child: Text(
                   "Dairy Cow, Daily Wealth!",
                   style: const TextStyle(
                     fontSize: 28,
@@ -681,14 +1071,9 @@ class ReceiptBuilder {
                   ),
                 ),
               ),
-              const SizedBox(height: 20),
-              Text(''),
-              Text(''),
-              Text(''),
-              Text(''),
-              Text(''),
-              Text(''),
-              const SizedBox(height: 24),
+              const SizedBox(height: 60),
+              // Extra spacing to ensure slogan prints
+              const SizedBox(height: 80),
             ],
           ),
         );

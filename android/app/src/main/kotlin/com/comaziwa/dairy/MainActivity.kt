@@ -1,4 +1,4 @@
-package com.example.comaziwa
+package com.comaziwa.dairy
 
 import io.flutter.embedding.android.FlutterActivity
 

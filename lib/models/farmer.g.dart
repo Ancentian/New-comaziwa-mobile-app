@@ -22,8 +22,8 @@ class FarmerAdapter extends TypeAdapter<Farmer> {
       lname: fields[2] as String,
       centerName: fields[3] as String,
       contact: fields[4] as String,
-      monthlyTotal: fields[5] as double,
-      yearlyTotal: fields[6] as double,
+      monthlyTotal: (fields[5] as double?) ?? 0.0,
+      yearlyTotal: (fields[6] as double?) ?? 0.0,
     );
   }
 

@@ -428,18 +428,18 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
   /// Auto-print receipt after saving collection
   Future<void> _autoPrintReceipt(MilkCollection collection) async {
     try {
-      // Use downloaded totals from server + add only unsynced local collections
+      // Calculate totals from ALL local collections (synced and unsynced)
       final today = DateTime.now();
       final todayStr = DateFormat('yyyy-MM-dd').format(today);
 
       double todayTotal = 0;
-      double additionalMonthly = 0;
-      double additionalYearly = 0;
+      double monthlyTotal = 0;
+      double yearlyTotal = 0;
 
-      // Only add unsynced (offline) collections to the server totals
+      // Get ALL collections (both synced and unsynced) from local storage
       final box = Hive.box<MilkCollection>('milk_collections');
       for (var record in box.values) {
-        if (record.farmerId == collection.farmerId && !record.isSynced) {
+        if (record.farmerId == collection.farmerId) {
           final recordDate = DateTime.tryParse(record.date);
           if (recordDate != null) {
             final recordTotal =
@@ -450,23 +450,19 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
               todayTotal += recordTotal;
             }
 
-            // Monthly additions
+            // Monthly total
             if (recordDate.year == today.year &&
                 recordDate.month == today.month) {
-              additionalMonthly += recordTotal;
+              monthlyTotal += recordTotal;
             }
 
-            // Yearly additions
+            // Yearly total
             if (recordDate.year == today.year) {
-              additionalYearly += recordTotal;
+              yearlyTotal += recordTotal;
             }
           }
         }
       }
-
-      // Downloaded totals + unsynced additions
-      final monthTotal = monthlyTotal + additionalMonthly;
-      final yearTotal = yearlyTotal + additionalYearly;
 
       // Get company name from SharedPreferences
       final prefs = await SharedPreferences.getInstance();
@@ -490,8 +486,8 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
         'company_name': companyName,
       };
 
-      final receiptWidget = ReceiptBuilder.milkReceipt(receiptData);
-      await PrinterService.printWithRetry(receiptWidget, context, retries: 2);
+      // Use direct print method for better reliability
+      await PrinterService.printWithData(receiptData, context, retries: 2);
     } catch (e) {
       // Silent fail - don't interrupt the save flow
       print('Auto-print failed: $e');

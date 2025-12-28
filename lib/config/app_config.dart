@@ -1,15 +1,21 @@
 // lib/config.dart
 
 class AppConfig {
-  static const bool isLocal = true;
-  static const bool enableAutoPrint = false; // Set to true to enable auto-print on app start
+  static const bool isLocal = false;
+  static const bool enableAutoPrint =
+      false; // Set to true to enable auto-print on app start
+
+  // Primary and fallback URLs in case of DNS issues
+  static const String primaryUrl = "https://kathande.embucomaziwa.co.ke";
+  static const String fallbackUrl =
+      "https://102.130.125.51"; // IP address fallback
 
   static String get baseUrl {
     if (isLocal) {
       // return "http://192.168.0.159:8000"; // for physical device
-      return "http://192.168.100.19:8000";
+      return "http://192.168.100.46:8000";
     } else {
-      return "https://kathande.embucomaziwa.co.ke";
+      return primaryUrl;
     }
   }
 
@@ -20,6 +26,9 @@ class AppConfig {
     }
     return baseUrl;
   }
+
+  // Alternative URL if primary fails
+  static String get alternativeUrl => fallbackUrl;
 }
 
 

@@ -4,8 +4,8 @@ import 'package:fluttertoast/fluttertoast.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import '../config/app_config.dart';
-import '../services/farmer_service.dart';
 import '../utils/http_retry_helper.dart';
 import '../utils/error_logger.dart';
 import 'error_logs_page.dart';
@@ -40,11 +40,11 @@ class _LoginPageState extends State<LoginPage> {
   }
 
   Future<void> _openTerms() async {
-    final uri = Uri.parse('${AppConfig.baseUrl}/terms');
+    final uri = Uri.parse('https://www.cowango.org/privacy-policy.html');
     try {
       if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
         Fluttertoast.showToast(
-          msg: 'Could not open Terms & Conditions',
+          msg: 'Could not open Privacy Policy',
           backgroundColor: Colors.red,
         );
       }
@@ -65,6 +65,19 @@ class _LoginPageState extends State<LoginPage> {
 
     if (email.isEmpty || password.isEmpty) {
       Fluttertoast.showToast(msg: "Email and password required");
+      return;
+    }
+
+    // Check internet connectivity first
+    final connectivityResult = await Connectivity().checkConnectivity();
+    if (connectivityResult == ConnectivityResult.none) {
+      Fluttertoast.showToast(
+        msg:
+            "No internet connection.\nPlease check your network and try again.",
+        backgroundColor: Colors.orange,
+        textColor: Colors.white,
+        toastLength: Toast.LENGTH_LONG,
+      );
       return;
     }
 
@@ -227,10 +240,26 @@ class _LoginPageState extends State<LoginPage> {
         stackTrace: StackTrace.current.toString(),
       );
 
+      // Better error messages for users
+      String userMessage = "Network error. Please try again.";
+
+      if (e.toString().contains('SocketException') ||
+          e.toString().contains('Failed host lookup')) {
+        userMessage =
+            "Cannot connect to server.\nPlease check your internet connection and try again.";
+      } else if (e.toString().contains('TimeoutException')) {
+        userMessage =
+            "Connection timeout.\nServer is taking too long to respond.";
+      } else if (e.toString().contains('HandshakeException')) {
+        userMessage =
+            "Secure connection failed.\nPlease check your network settings.";
+      }
+
       Fluttertoast.showToast(
-        msg: "Network error: $e",
+        msg: userMessage,
         backgroundColor: Colors.red,
         textColor: Colors.white,
+        toastLength: Toast.LENGTH_LONG,
       );
     }
   }
@@ -241,157 +270,301 @@ class _LoginPageState extends State<LoginPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFF7F9FB),
-      body: Center(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            children: [
-              Image.asset('assets/logo.png', height: 90),
-              const SizedBox(height: 10),
-              const Text(
-                "People for development",
-                style: TextStyle(fontSize: 13, color: Colors.grey),
-              ),
-              const SizedBox(height: 30),
-
-              Card(
-                elevation: 6,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 24,
-                    vertical: 32,
+      body: SafeArea(
+        child: Container(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [
+                Colors.green.shade50,
+                const Color(0xFFF7F9FB),
+                Colors.white,
+              ],
+            ),
+          ),
+          child: Center(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
+              child: Column(
+                children: [
+                  // Logo with enhanced styling
+                  Hero(
+                    tag: 'app_logo',
+                    child: Container(
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        shape: BoxShape.circle,
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.green.shade300.withOpacity(0.4),
+                            blurRadius: 20,
+                            spreadRadius: 5,
+                          ),
+                        ],
+                      ),
+                      child: Image.asset('assets/logo.png', height: 90),
+                    ),
                   ),
-                  child: Column(
-                    children: [
-                      const Text(
-                        "Login",
-                        style: TextStyle(
-                          fontSize: 24,
-                          fontWeight: FontWeight.bold,
-                        ),
+                  const SizedBox(height: 24),
+                  // Welcome text
+                  ShaderMask(
+                    shaderCallback: (bounds) => LinearGradient(
+                      colors: [Colors.green.shade700, Colors.green.shade900],
+                    ).createShader(bounds),
+                    child: const Text(
+                      "Welcome to Comaziwa",
+                      style: TextStyle(
+                        fontSize: 24,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
                       ),
-                      const SizedBox(height: 8),
-                      const Text(
-                        "Access to our dashboard",
-                        style: TextStyle(color: Colors.black54),
-                      ),
-                      const SizedBox(height: 32),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    "Dairy Management Made Simple",
+                    style: TextStyle(
+                      fontSize: 14,
+                      color: Colors.grey[600],
+                      fontStyle: FontStyle.italic,
+                    ),
+                  ),
+                  const SizedBox(height: 32),
 
-                      TextField(
-                        controller: _emailController,
-                        decoration: InputDecoration(
-                          labelText: "Email Address",
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          prefixIcon: const Icon(Icons.email_outlined),
-                        ),
-                        keyboardType: TextInputType.emailAddress,
+                  Card(
+                    elevation: 8,
+                    shadowColor: Colors.green.shade300,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 24,
+                        vertical: 32,
                       ),
-                      const SizedBox(height: 16),
-
-                      TextField(
-                        controller: _passwordController,
-                        obscureText: _obscurePassword,
-                        decoration: InputDecoration(
-                          labelText: "Password",
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          prefixIcon: const Icon(Icons.lock_outline),
-                          suffixIcon: IconButton(
-                            icon: Icon(
-                              _obscurePassword
-                                  ? Icons.visibility
-                                  : Icons.visibility_off,
+                      child: Column(
+                        children: [
+                          const Text(
+                            "Login",
+                            style: TextStyle(
+                              fontSize: 24,
+                              fontWeight: FontWeight.bold,
                             ),
-                            onPressed: () {
-                              setState(() {
-                                _obscurePassword = !_obscurePassword;
-                              });
-                            },
                           ),
-                        ),
-                      ),
-                      const SizedBox(height: 24),
+                          const SizedBox(height: 8),
+                          const Text(
+                            "Access to our dashboard",
+                            style: TextStyle(color: Colors.black54),
+                          ),
+                          const SizedBox(height: 32),
 
-                      _isLoading
-                          ? const CircularProgressIndicator()
-                          : SizedBox(
-                              width: double.infinity,
-                              height: 50,
-                              child: ElevatedButton(
-                                onPressed: login,
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: Colors.green,
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(10),
+                          TextField(
+                            controller: _emailController,
+                            decoration: InputDecoration(
+                              labelText: "Email Address",
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              prefixIcon: const Icon(Icons.email_outlined),
+                            ),
+                            keyboardType: TextInputType.emailAddress,
+                          ),
+                          const SizedBox(height: 16),
+
+                          TextField(
+                            controller: _passwordController,
+                            obscureText: _obscurePassword,
+                            decoration: InputDecoration(
+                              labelText: "Password",
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              prefixIcon: const Icon(Icons.lock_outline),
+                              suffixIcon: IconButton(
+                                icon: Icon(
+                                  _obscurePassword
+                                      ? Icons.visibility
+                                      : Icons.visibility_off,
+                                ),
+                                onPressed: () {
+                                  setState(() {
+                                    _obscurePassword = !_obscurePassword;
+                                  });
+                                },
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 24),
+
+                          _isLoading
+                              ? Column(
+                                  children: [
+                                    CircularProgressIndicator(
+                                      color: Colors.green.shade700,
+                                    ),
+                                    const SizedBox(height: 12),
+                                    Text(
+                                      "Signing you in...",
+                                      style: TextStyle(
+                                        color: Colors.grey[600],
+                                        fontSize: 13,
+                                      ),
+                                    ),
+                                  ],
+                                )
+                              : SizedBox(
+                                  width: double.infinity,
+                                  height: 50,
+                                  child: ElevatedButton(
+                                    onPressed: login,
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: Colors.green.shade700,
+                                      elevation: 3,
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(12),
+                                      ),
+                                    ),
+                                    child: const Row(
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.center,
+                                      children: [
+                                        Text(
+                                          "Login",
+                                          style: TextStyle(
+                                            fontSize: 16,
+                                            color: Colors.white,
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                        ),
+                                        SizedBox(width: 8),
+                                        Icon(
+                                          Icons.arrow_forward_rounded,
+                                          size: 20,
+                                        ),
+                                      ],
+                                    ),
                                   ),
                                 ),
-                                child: const Text(
-                                  "Login",
-                                  style: TextStyle(
-                                    fontSize: 16,
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.bold,
-                                  ),
+                        ],
+                      ),
+                    ),
+                  ),
+
+                  // Terms, Version and View Logs Links
+                  Padding(
+                    padding: const EdgeInsets.only(top: 32),
+                    child: Column(
+                      children: [
+                        // Privacy Policy Button
+                        Container(
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              colors: [
+                                Colors.green.shade50,
+                                Colors.green.shade100,
+                              ],
+                            ),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(color: Colors.green.shade200),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.green.shade200,
+                                blurRadius: 8,
+                                offset: const Offset(0, 2),
+                              ),
+                            ],
+                          ),
+                          child: Material(
+                            color: Colors.transparent,
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(12),
+                              onTap: _openTerms,
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 20,
+                                  vertical: 12,
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      Icons.privacy_tip_outlined,
+                                      color: Colors.green.shade700,
+                                      size: 18,
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      'Privacy Policy',
+                                      style: TextStyle(
+                                        color: Colors.green.shade700,
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 4),
+                                    Icon(
+                                      Icons.open_in_new,
+                                      color: Colors.green.shade700,
+                                      size: 14,
+                                    ),
+                                  ],
                                 ),
                               ),
                             ),
-                    ],
-                  ),
-                ),
-              ),
-
-              // Terms, Version and View Logs Links
-              Padding(
-                padding: const EdgeInsets.only(top: 16),
-                child: Column(
-                  children: [
-                    GestureDetector(
-                      onTap: _openTerms,
-                      child: Text(
-                        'Terms & Conditions',
-                        style: TextStyle(
-                          color: Colors.blue.shade700,
-                          fontSize: 13,
-                          decoration: TextDecoration.underline,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    if (_appVersion.isNotEmpty)
-                      Text(
-                        'v${_appVersion.split('.').take(2).join('.')}',
-                        style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-                      ),
-                    const SizedBox(height: 8),
-                    GestureDetector(
-                      onTap: () {
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (context) => const ErrorLogsPage(),
                           ),
-                        );
-                      },
-                      child: Text(
-                        'View Error Logs',
-                        style: TextStyle(
-                          color: Colors.grey[600],
-                          fontSize: 12,
-                          decoration: TextDecoration.underline,
                         ),
-                      ),
+                        const SizedBox(height: 16),
+                        // Version
+                        if (_appVersion.isNotEmpty)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 6,
+                            ),
+                            decoration: BoxDecoration(
+                              color: Colors.grey.shade100,
+                              borderRadius: BorderRadius.circular(20),
+                            ),
+                            child: Text(
+                              'Version ${_appVersion.split('.').take(2).join('.')}',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: Colors.grey[700],
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ),
+                        const SizedBox(height: 8),
+                        // Hidden Error Logs
+                        Opacity(
+                          opacity: 0.0,
+                          child: GestureDetector(
+                            onTap: () {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (context) => const ErrorLogsPage(),
+                                ),
+                              );
+                            },
+                            child: Text(
+                              'View Error Logs',
+                              style: TextStyle(
+                                color: Colors.grey[600],
+                                fontSize: 12,
+                                decoration: TextDecoration.underline,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
-            ],
+            ),
           ),
         ),
       ),
