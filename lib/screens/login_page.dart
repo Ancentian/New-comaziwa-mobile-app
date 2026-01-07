@@ -201,6 +201,25 @@ class _LoginPageState extends State<LoginPage> {
         }
 
         // -----------------------------
+        // 🔥 SAVE GRADER COLLECTION CENTERS
+        // -----------------------------
+        if (data['user'] != null &&
+            data['user']['collection_centers'] != null) {
+          final centers = (data['user']['collection_centers'] as List)
+              .map((e) => e.toString())
+              .toList();
+          await prefs.setStringList('grader_centers', centers);
+          print('💾 Saved grader centers: $centers');
+          print('📊 User type: ${data['user']['type']}');
+          print('📊 Full user data: ${data['user']}');
+        } else {
+          // Clear any previously saved centers if user is not a grader
+          await prefs.remove('grader_centers');
+          print('⚠️ No collection centers found - clearing grader_centers');
+          print('📊 User type: ${data['user']?['type']}');
+        }
+
+        // -----------------------------
         // 🔥 SAVE COMPANY INFO
         // -----------------------------
         if (data['company'] != null) {

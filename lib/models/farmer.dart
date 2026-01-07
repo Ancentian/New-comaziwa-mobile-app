@@ -25,6 +25,9 @@ class Farmer extends HiveObject {
   @HiveField(6)
   double yearlyTotal;
 
+  @HiveField(7)
+  int? centerId;
+
   Farmer({
     required this.farmerId,
     required this.fname,
@@ -33,6 +36,7 @@ class Farmer extends HiveObject {
     required this.contact,
     this.monthlyTotal = 0.0,
     this.yearlyTotal = 0.0,
+    this.centerId,
   });
 
   factory Farmer.fromJson(Map<String, dynamic> json) {
@@ -51,6 +55,11 @@ class Farmer extends HiveObject {
             json['contact1']?.toString() ?? json['contact']?.toString() ?? '',
         monthlyTotal: _safeDouble(json['monthly_total']),
         yearlyTotal: _safeDouble(json['yearly_total']),
+        centerId: json['center_id'] is int
+            ? json['center_id']
+            : (json['center_id'] != null
+                  ? int.tryParse('${json['center_id']}')
+                  : null),
       );
     } catch (e) {
       print('Error parsing farmer: $e');
@@ -74,5 +83,6 @@ class Farmer extends HiveObject {
     'contact1': contact,
     'monthly_total': monthlyTotal,
     'yearly_total': yearlyTotal,
+    'center_id': centerId,
   };
 }

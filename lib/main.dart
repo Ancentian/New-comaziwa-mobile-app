@@ -7,6 +7,7 @@ import 'screens/milk_collection_page.dart';
 import 'screens/milk_list_page.dart';
 import 'screens/farmers_list_page.dart';
 import 'screens/profile_page.dart';
+import 'screens/daily_collection_summary_page.dart';
 import 'utils/theme_provider.dart';
 
 import 'models/farmer.dart';
@@ -53,7 +54,7 @@ Future<void> main() async {
 /// Check schema version and migrate data if structure changed
 Future<void> _checkAndMigrateSchema() async {
   const currentSchemaVersion =
-      2; // Incremented for monthlyTotal/yearlyTotal fields
+      3; // Incremented for createdById/createdByType fields in MilkCollection
 
   final prefs = await Hive.openBox('app_prefs');
   final savedVersion = prefs.get('schema_version', defaultValue: 1);
@@ -110,6 +111,7 @@ class MyApp extends StatelessWidget {
               '/milkCollection': (context) => const MilkCollectionPage(),
               '/milkList': (context) => const MilkListPage(),
               '/farmersList': (context) => const FarmersListPage(),
+              '/dailySummary': (context) => const DailyCollectionSummaryPage(),
               '/login': (context) => const LoginPage(),
             },
           );

@@ -65,7 +65,8 @@ class _DashboardPageState extends State<DashboardPage>
     _controller.forward();
 
     final now = DateTime.now();
-    final start = DateTime(now.year, now.month - 4, now.day);
+    // For monthly data: Start from first day of the month 5 months ago (current + 5 past = 6 months)
+    final start = DateTime(now.year, now.month - 5, 1);
     selectedRange = DateTimeRange(start: start, end: now);
 
     fetchDashboardData(range: selectedRange);
@@ -301,7 +302,8 @@ class _DashboardPageState extends State<DashboardPage>
       if (range != null) {
         final start = DateFormat('yyyy-MM-dd').format(range.start);
         final end = DateFormat('yyyy-MM-dd').format(range.end);
-        query = '?start_date=$start&end_date=$end';
+        query =
+            '?start_date=$start&end_date=$end&monthly_limit=6&daily_limit=7';
       }
 
       String url = "$apiBase/dashboard_milk_data$query";
@@ -610,6 +612,11 @@ class _DashboardPageState extends State<DashboardPage>
                       'Members List',
                       '/farmersList',
                     ),
+                    _drawerTile(
+                      Icons.summarize_outlined,
+                      'Daily Summary',
+                      '/dailySummary',
+                    ),
                     const Divider(height: 1, thickness: 1),
                     _drawerTile(
                       Icons.print_outlined,
@@ -822,13 +829,18 @@ class _DashboardPageState extends State<DashboardPage>
   Widget _buildDailyBarChart() {
     if (dailyData.isEmpty) return const SizedBox.shrink();
 
-    final maxY = dailyData
+    // Show only last 7 days
+    final limitedData = dailyData.length > 7
+        ? dailyData.sublist(dailyData.length - 7)
+        : dailyData;
+
+    final maxY = limitedData
         .map((e) => (e['total_milk'] ?? e['total'] ?? 0) * 1.0)
         .fold<double>(0, (a, b) => a > b ? a : b);
 
     final bars = <BarChartGroupData>[];
-    for (int i = 0; i < dailyData.length; i++) {
-      final item = dailyData[i];
+    for (int i = 0; i < limitedData.length; i++) {
+      final item = limitedData[i];
       double y = 0;
       try {
         y = (item['total_milk'] ?? item['total'] ?? 0) * 1.0;
@@ -888,23 +900,30 @@ class _DashboardPageState extends State<DashboardPage>
                     bottomTitles: AxisTitles(
                       sideTitles: SideTitles(
                         showTitles: true,
-                        reservedSize: 36,
+                        reservedSize: 50,
                         getTitlesWidget: (value, meta) {
                           final idx = value.toInt();
-                          if (idx < 0 || idx >= dailyData.length) {
+                          if (idx < 0 || idx >= limitedData.length) {
                             return const Text('');
                           }
-                          final raw = dailyData[idx]['date']?.toString() ?? '';
+                          final raw =
+                              limitedData[idx]['date']?.toString() ?? '';
                           try {
                             final d = DateTime.parse(raw);
-                            return Text(
-                              DateFormat('MM/dd').format(d),
-                              style: const TextStyle(fontSize: 10),
+                            return Transform.rotate(
+                              angle: -0.785398, // -45 degrees in radians
+                              child: Text(
+                                DateFormat('MM/dd').format(d),
+                                style: const TextStyle(fontSize: 10),
+                              ),
                             );
                           } catch (_) {
-                            return Text(
-                              raw,
-                              style: const TextStyle(fontSize: 10),
+                            return Transform.rotate(
+                              angle: -0.785398,
+                              child: Text(
+                                raw,
+                                style: const TextStyle(fontSize: 10),
+                              ),
                             );
                           }
                         },
@@ -923,11 +942,11 @@ class _DashboardPageState extends State<DashboardPage>
                     touchTooltipData: BarTouchTooltipData(
                       getTooltipItem: (group, groupIndex, rod, rodIndex) {
                         final idx = group.x.toInt();
-                        final dateLabel = (idx >= 0 && idx < dailyData.length)
-                            ? (dailyData[idx]['date']?.toString() ?? '')
+                        final dateLabel = (idx >= 0 && idx < limitedData.length)
+                            ? (limitedData[idx]['date']?.toString() ?? '')
                             : '';
                         return BarTooltipItem(
-                          "$dateLabel\n${rod.toY} L",
+                          "$dateLabel\n${rod.toY.toStringAsFixed(2)} L",
                           const TextStyle(color: Colors.white),
                         );
                       },
@@ -945,11 +964,16 @@ class _DashboardPageState extends State<DashboardPage>
   Widget _buildMonthlyLineChart() {
     if (monthlyData.isEmpty) return const SizedBox.shrink();
 
+    // Show only last 6 months
+    final limitedMonthly = monthlyData.length > 6
+        ? monthlyData.sublist(monthlyData.length - 6)
+        : monthlyData;
+
     final spots = <FlSpot>[];
     final monthLabels = <String>[];
 
-    for (int i = 0; i < monthlyData.length; i++) {
-      final m = monthlyData[i];
+    for (int i = 0; i < limitedMonthly.length; i++) {
+      final m = limitedMonthly[i];
 
       // determine the month token in the API response
       final monthToken = m['month'] ?? m['month_name'] ?? m['m'] ?? m['label'];
@@ -996,15 +1020,18 @@ class _DashboardPageState extends State<DashboardPage>
                     bottomTitles: AxisTitles(
                       sideTitles: SideTitles(
                         showTitles: true,
-                        reservedSize: 42,
+                        reservedSize: 60,
                         getTitlesWidget: (value, meta) {
                           final idx = value.toInt();
                           if (idx < 0 || idx >= monthLabels.length) {
                             return const Text('');
                           }
-                          return Text(
-                            monthLabels[idx],
-                            style: const TextStyle(fontSize: 10),
+                          return Transform.rotate(
+                            angle: -0.785398, // -45 degrees in radians
+                            child: Text(
+                              monthLabels[idx],
+                              style: const TextStyle(fontSize: 10),
+                            ),
                           );
                         },
                       ),

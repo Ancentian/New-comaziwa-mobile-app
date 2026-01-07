@@ -1,7 +1,7 @@
 // lib/config.dart
 
 class AppConfig {
-  static const bool isLocal = false;
+  static const bool isLocal = false; // change to false in production
   static const bool enableAutoPrint =
       false; // Set to true to enable auto-print on app start
 
@@ -13,7 +13,7 @@ class AppConfig {
   static String get baseUrl {
     if (isLocal) {
       // return "http://192.168.0.159:8000"; // for physical device
-      return "http://192.168.100.46:8000";
+      return "http://192.168.100.73:8000";
     } else {
       return primaryUrl;
     }

@@ -31,6 +31,9 @@ class _MilkListPageState extends State<MilkListPage>
   DateTime? endDate;
   Map<String, String> printStatus = {}; // Track print status per item ID
 
+  String? userType;
+  int? userId;
+
   late AnimationController _controller;
   late Animation<double> _animation;
 
@@ -47,6 +50,17 @@ class _MilkListPageState extends State<MilkListPage>
     DateTime now = DateTime.now();
     startDate = DateTime(now.year, now.month, 1);
     endDate = DateTime(now.year, now.month + 1, 0);
+
+    // Load user info and then fetch data
+    _loadUserInfo();
+  }
+
+  /// Load user information for role-based filtering
+  Future<void> _loadUserInfo() async {
+    final prefs = await SharedPreferences.getInstance();
+    userType = prefs.getString('type');
+    userId = prefs.getInt('user_id');
+    print('👤 Milk List - User type: $userType, ID: $userId');
 
     // Load from Hive (already synced on dashboard load)
     fetchMilkList();
@@ -89,7 +103,27 @@ class _MilkListPageState extends State<MilkListPage>
 
     print("📊 Loading ${box.length} records from Hive");
 
-    final allRecords = box.values.map((e) {
+    var allRecords = box.values.toList();
+
+    // Apply role-based filtering
+    // Only employees (graders) can only see records they created
+    // Users, admins, and owners can see all records
+    if (userType != null &&
+        (userType == 'employee' || userType == 'grader') &&
+        userId != null) {
+      allRecords = allRecords.where((e) {
+        return e.createdById == userId;
+      }).toList();
+      print(
+        '🔒 Employee - filtered to ${allRecords.length} collections for user $userId',
+      );
+    } else {
+      print(
+        '👑 User/Admin/Owner - showing all ${allRecords.length} collections',
+      );
+    }
+
+    final mappedRecords = allRecords.map((e) {
       return {
         'id': e.serverId != null ? 'server_${e.serverId}' : 'local_${e.key}',
         'server_id': e.serverId, // Track server ID
@@ -107,7 +141,7 @@ class _MilkListPageState extends State<MilkListPage>
       };
     }).toList();
 
-    combinedList.addAll(allRecords);
+    combinedList.addAll(mappedRecords);
 
     print("✅ Loaded ${combinedList.length} total records (synced + local)");
 
@@ -336,15 +370,14 @@ class _MilkListPageState extends State<MilkListPage>
         printStatus[itemId] = 'printing';
       });
 
-      // Get farmer totals from server + add only unsynced local collections
-      print("📊 Fetching totals from server...");
-
+      // OPTIMIZED: Use cached data instead of recalculating from scratch
+      // The item already contains the farmer info we need
       final farmerId = item['farmerID'];
       final prefs = await SharedPreferences.getInstance();
       final companyName = prefs.getString('company_name');
-      final token = await _getAuthToken();
-      final tenantId = prefs.getInt('tenant_id');
 
+      // Quick calculation: only scan local Hive for this farmer's totals
+      // This is faster than API call + full scan
       final today = DateTime.now();
       final todayStr = DateFormat('yyyy-MM-dd').format(today);
       final currentYear = today.year;
@@ -354,7 +387,7 @@ class _MilkListPageState extends State<MilkListPage>
       double monthlyTotal = 0;
       double yearlyTotal = 0;
 
-      // Get ALL collections (both synced and unsynced) from local storage
+      // Single pass through local data for this farmer only
       final box = Hive.box<MilkCollection>('milk_collections');
       for (var record in box.values) {
         if (record.farmerId == farmerId) {
@@ -363,52 +396,19 @@ class _MilkListPageState extends State<MilkListPage>
             final recordTotal =
                 record.morning + record.evening - record.rejected;
 
-            // Today's total
             if (DateFormat('yyyy-MM-dd').format(recordDate) == todayStr) {
               todayTotal += recordTotal;
             }
-
-            // Monthly total
             if (recordDate.month == currentMonth) {
               monthlyTotal += recordTotal;
             }
-
-            // Yearly total
             yearlyTotal += recordTotal;
           }
         }
       }
 
-      // Also try to fetch server totals and use them if local data is empty
-      if (token != null &&
-          tenantId != null &&
-          (todayTotal == 0 && monthlyTotal == 0)) {
-        try {
-          final res = await http.get(
-            Uri.parse("$apiBase/find-farmer/$farmerId?tenant_id=$tenantId"),
-            headers: {"Authorization": "Bearer $token"},
-          );
-
-          if (res.statusCode == 200) {
-            final data = json.decode(res.body);
-            // Use server totals only if we have no local data
-            if (todayTotal == 0) {
-              todayTotal = (data['todays_total'] ?? 0).toDouble();
-            }
-            if (monthlyTotal == 0) {
-              monthlyTotal = (data['monthly_total'] ?? 0).toDouble();
-            }
-            if (yearlyTotal == 0) {
-              yearlyTotal = (data['yearly_total'] ?? 0).toDouble();
-            }
-          }
-        } catch (e) {
-          print("⚠️ Could not fetch from API: $e");
-        }
-      }
-
       print(
-        "✅ Totals: Today=$todayTotal, Monthly=$monthlyTotal, Yearly=$yearlyTotal",
+        "✅ Quick totals: Today=$todayTotal, Monthly=$monthlyTotal, Yearly=$yearlyTotal",
       );
 
       // Add totals to item data
@@ -418,48 +418,52 @@ class _MilkListPageState extends State<MilkListPage>
       enrichedItem['yearly_total'] = yearlyTotal.toStringAsFixed(2);
       enrichedItem['company_name'] = companyName;
 
-      // Use direct print method for better reliability
-      final ok = await PrinterService.printWithData(
-        enrichedItem,
-        context,
-        retries: 2,
-      );
-      if (!ok) throw Exception('Print failed');
-
-      // Set status to success
-      setState(() {
-        printStatus[itemId] = 'success';
-      });
-
-      Fluttertoast.showToast(
-        msg: "Printed successfully",
-        backgroundColor: Colors.green,
-        toastLength: Toast.LENGTH_SHORT,
-      );
-
-      // Clear status after 2 seconds
-      Future.delayed(const Duration(seconds: 2), () {
+      // Use fast direct print - no waiting
+      PrinterService.printDirectlyFast(enrichedItem, context).then((ok) {
         if (mounted) {
           setState(() {
-            printStatus.remove(itemId);
+            printStatus[itemId] = ok ? 'success' : 'error';
+          });
+
+          if (ok) {
+            Fluttertoast.showToast(
+              msg: "Print sent",
+              backgroundColor: Colors.green,
+              toastLength: Toast.LENGTH_SHORT,
+            );
+          } else {
+            Fluttertoast.showToast(
+              msg: "Print failed - check printer",
+              backgroundColor: Colors.red,
+              toastLength: Toast.LENGTH_SHORT,
+            );
+          }
+
+          // Clear status after 2 seconds
+          Future.delayed(const Duration(seconds: 2), () {
+            if (mounted) {
+              setState(() {
+                printStatus.remove(itemId);
+              });
+            }
           });
         }
       });
+
+      // Return immediately - don't block UI
     } catch (e) {
-      // Set status to error
+      print("Print error: $e");
       setState(() {
         printStatus[itemId] = 'error';
       });
-
       Fluttertoast.showToast(
-        msg: "Print failed: $e",
+        msg: "Print error",
         backgroundColor: Colors.red,
-        textColor: Colors.white,
-        toastLength: Toast.LENGTH_LONG,
+        toastLength: Toast.LENGTH_SHORT,
       );
 
-      // Clear status after 3 seconds
-      Future.delayed(const Duration(seconds: 3), () {
+      // Clear error status after 2 seconds
+      Future.delayed(const Duration(seconds: 2), () {
         if (mounted) {
           setState(() {
             printStatus.remove(itemId);

@@ -401,6 +401,58 @@ class PrinterService {
     }
   }
 
+  /// Ultra-fast direct print for auto-print - skips connection test
+  /// Use when you know the printer is already configured and connected
+  static Future<bool> printDirectlyFast(
+    Map<String, dynamic> receiptData,
+    BuildContext context,
+  ) async {
+    try {
+      // Get printer address quickly (no connection check)
+      if (_printerAddress == null) {
+        if (AutoPrintService.isAutoPrintEnabled()) {
+          final printerAddress = AutoPrintService.getDefaultPrinterAddress();
+          if (printerAddress != null) {
+            _printerAddress = _normalizeMacAddress(printerAddress);
+          }
+        }
+      }
+
+      if (_printerAddress == null) {
+        print('⚠️ No printer configured for fast print');
+        return false;
+      }
+
+      // Build and send immediately - no delays or connection tests
+      final bytes = buildMilkReceiptEscPos(receiptData);
+
+      // Fire and forget - don't wait for response
+      FlutterBluetoothPrinter.printBytes(
+            address: _printerAddress!,
+            data: bytes,
+            keepConnected: false,
+            maxBufferSize: 1024,
+            delayTime: 80, // Faster chunks for speed
+          )
+          .then((success) {
+            if (success) {
+              print('✅ Fast print sent successfully');
+            } else {
+              print('⚠️ Fast print may have failed');
+            }
+          })
+          .catchError((e) {
+            print('⚠️ Fast print error: $e');
+          });
+
+      // Return immediately without waiting
+      return true;
+    } catch (e) {
+      print('❌ Fast print error: $e');
+      return false;
+    }
+  }
+
   /// Build ESC/POS receipt for milk collection with enhanced design
   static Uint8List buildMilkReceiptEscPos(Map<String, dynamic> data) {
     final out = <int>[];
@@ -893,6 +945,235 @@ class PrinterService {
   /// Get current default printer address
   static String? getDefaultPrinterAddress() {
     return AutoPrintService.getDefaultPrinterAddress();
+  }
+
+  /// Print daily collection summary
+  static Future<bool> printDailySummary(
+    Map<String, dynamic> summaryData,
+    BuildContext context,
+  ) async {
+    print('🖨️ Starting daily summary print job...');
+
+    try {
+      // Check Bluetooth and printer connection first
+      final isReady = await checkBluetoothConnection(context);
+      if (!isReady) {
+        print('❌ Bluetooth connection not ready');
+        return false;
+      }
+
+      // Ensure we have a printer address
+      if (AutoPrintService.isAutoPrintEnabled()) {
+        final printerAddress = AutoPrintService.getDefaultPrinterAddress();
+        if (printerAddress != null) {
+          _printerAddress = _normalizeMacAddress(printerAddress);
+          print('📋 Using auto-print address: $_printerAddress');
+        }
+      }
+
+      if (_printerAddress == null) {
+        print('⚠️ No printer address, prompting selection...');
+        final ok = await selectPrinter(context);
+        if (!ok) return false;
+      }
+
+      print('🎯 Printer address: $_printerAddress');
+
+      // Test printer connection first
+      final connectionOk = await testPrinterConnection(_printerAddress!);
+      if (!connectionOk) {
+        Fluttertoast.showToast(
+          msg:
+              'Cannot connect to printer. Check if it\'s powered on and in range.',
+          backgroundColor: Colors.orange,
+          toastLength: Toast.LENGTH_LONG,
+        );
+        return false;
+      }
+
+      print('📝 Building daily summary receipt...');
+
+      // Build ESC/POS receipt for daily summary
+      final bytes = buildDailySummaryEscPos(summaryData);
+      print('📤 Sending ${bytes.length} bytes to printer: $_printerAddress');
+
+      // Send to printer
+      final success = await FlutterBluetoothPrinter.printBytes(
+        address: _printerAddress!,
+        data: bytes,
+        keepConnected: false,
+        maxBufferSize: 1024,
+        delayTime: 120,
+      );
+
+      if (!success) {
+        throw Exception('printBytes returned false');
+      }
+
+      print('⏳ Waiting for transmission...');
+      await Future.delayed(const Duration(milliseconds: 1500));
+
+      print('✅ Daily summary print completed successfully');
+      return true;
+    } catch (e) {
+      print('❌ Daily summary print error: $e');
+      Fluttertoast.showToast(
+        msg: 'Print failed: ${e.toString()}',
+        backgroundColor: Colors.red,
+        toastLength: Toast.LENGTH_LONG,
+      );
+      return false;
+    }
+  }
+
+  /// Build ESC/POS receipt for daily collection summary
+  static Uint8List buildDailySummaryEscPos(Map<String, dynamic> data) {
+    final out = <int>[];
+
+    // Initialize printer
+    out.addAll(escInit());
+    out.addAll(escSelectCP437());
+    out.addAll(escFontA());
+    out.addAll(escNormalSize());
+    out.addAll(escNewLine(1));
+
+    // ============ HEADER ============
+    out.addAll(escAlignCenter());
+    out.addAll(escDoubleHeight());
+    out.addAll(escBoldOn());
+    out.addAll(_bytesFromString('DAILY COLLECTION\n'));
+    out.addAll(_bytesFromString('SUMMARY\n'));
+    out.addAll(escBoldOff());
+    out.addAll(escNormalSize());
+    out.addAll(escNewLine(1));
+
+    // Company Name
+    if (data['company_name'] != null) {
+      out.addAll(escDoubleWidth());
+      out.addAll(escBoldOn());
+      out.addAll(_bytesFromString('${data['company_name']}\n'));
+      out.addAll(escBoldOff());
+      out.addAll(escNormalSize());
+    }
+
+    out.addAll(_bytesFromString('P.O BOX 297-60100\n'));
+    out.addAll(_bytesFromString('EMBU, KENYA\n'));
+    out.addAll(_bytesFromString('Tel: 0743935667\n'));
+    out.addAll(escNewLine(1));
+    out.addAll(escDoubleLine());
+
+    // ============ DATE ============
+    out.addAll(escAlignLeft());
+    out.addAll(escDoubleHeight());
+    out.addAll(escBoldOn());
+    out.addAll(_bytesFromString('Date: ${data['date']}\n'));
+    out.addAll(escBoldOff());
+    out.addAll(escNormalSize());
+    out.addAll(escNewLine(1));
+    out.addAll(escSingleLine());
+
+    // ============ SUMMARY TOTALS ============
+    out.addAll(escAlignCenter());
+    out.addAll(escBoldOn());
+    out.addAll(_bytesFromString('SUMMARY TOTALS\n'));
+    out.addAll(escBoldOff());
+    out.addAll(escAlignLeft());
+    out.addAll(escNewLine(1));
+
+    out.addAll(escBoldOn());
+    out.addAll(
+      _bytesFromString(
+        'Total Farmers:      ${_padRight(data['total_farmers']?.toString() ?? '0', 6)}\n',
+      ),
+    );
+    out.addAll(escBoldOff());
+    out.addAll(escNewLine(1));
+
+    out.addAll(
+      _bytesFromString(
+        'Morning Milk:       ${_padRight(data['total_morning'] ?? '0', 7)} L\n',
+      ),
+    );
+    out.addAll(
+      _bytesFromString(
+        'Evening Milk:       ${_padRight(data['total_evening'] ?? '0', 7)} L\n',
+      ),
+    );
+    out.addAll(
+      _bytesFromString(
+        'Rejected Milk:      ${_padRight(data['total_rejected'] ?? '0', 7)} L\n',
+      ),
+    );
+    out.addAll(escDashedLine());
+
+    // Grand Total (emphasized)
+    out.addAll(escDoubleHeight());
+    out.addAll(escBoldOn());
+    out.addAll(
+      _bytesFromString('GRAND TOTAL: ${data['grand_total'] ?? '0'} L\n'),
+    );
+    out.addAll(escBoldOff());
+    out.addAll(escNormalSize());
+    out.addAll(escNewLine(1));
+    out.addAll(escDoubleLine());
+
+    // ============ COLLECTIONS TABLE ============
+    out.addAll(escAlignCenter());
+    out.addAll(escBoldOn());
+    out.addAll(_bytesFromString('FARMER COLLECTIONS\n'));
+    out.addAll(escBoldOff());
+    out.addAll(escAlignLeft());
+    out.addAll(escNewLine(1));
+
+    // Table Header
+    out.addAll(escBoldOn());
+    out.addAll(_bytesFromString('ID   Morning Evening Total\n'));
+    out.addAll(escBoldOff());
+    out.addAll(escSingleLine());
+
+    // Table Rows (limit to first 50 for printing)
+    final collections =
+        data['collections'] as List<Map<String, dynamic>>? ?? [];
+    final limit = collections.length > 50 ? 50 : collections.length;
+
+    for (int i = 0; i < limit; i++) {
+      final col = collections[i];
+      final farmerId = col['farmerId'].toString().padRight(5);
+      final morning = col['morning'].toStringAsFixed(1).padLeft(7);
+      final evening = col['evening'].toStringAsFixed(1).padLeft(7);
+      final total = col['total'].toStringAsFixed(1).padLeft(6);
+
+      out.addAll(_bytesFromString('$farmerId$morning $evening $total\n'));
+    }
+
+    if (collections.length > 50) {
+      out.addAll(escNewLine(1));
+      out.addAll(escAlignCenter());
+      out.addAll(_bytesFromString('... and ${collections.length - 50} more\n'));
+      out.addAll(escAlignLeft());
+    }
+
+    out.addAll(escNewLine(1));
+    out.addAll(escDoubleLine());
+
+    // ============ FOOTER ============
+    out.addAll(escAlignCenter());
+    out.addAll(escNewLine(1));
+    out.addAll(escDoubleHeight());
+    out.addAll(escBoldOn());
+    out.addAll(_bytesFromString('Dairy Cow,\n'));
+    out.addAll(_bytesFromString('Daily Wealth!\n'));
+    out.addAll(escBoldOff());
+    out.addAll(escNormalSize());
+    out.addAll(escNewLine(1));
+
+    out.addAll(_bytesFromString('${_formatDateTime(DateTime.now())}\n'));
+
+    // Extra spacing and cut
+    out.addAll(escNewLine(4));
+    out.addAll(escCut());
+
+    return Uint8List.fromList(out);
   }
 }
 
