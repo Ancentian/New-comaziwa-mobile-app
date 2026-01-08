@@ -241,11 +241,22 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
 
       final farmersBox = Hive.box<Farmer>('farmers');
 
+      // 🔥 Get grader centers for filtering
+      final prefs = await SharedPreferences.getInstance();
+      final graderCenters = prefs.getStringList('grader_centers');
+
       // 1. Try offline search first
-      final cached = farmersBox.values.cast<Farmer?>().firstWhere(
-        (f) => f != null && f.farmerId.toString() == memberNo,
-        orElse: () => null,
-      );
+      final cached = farmersBox.values.cast<Farmer?>().firstWhere((f) {
+        if (f == null || f.farmerId.toString() != memberNo) return false;
+
+        // 🔥 Apply grader filter if user is a grader
+        if (graderCenters != null && graderCenters.isNotEmpty) {
+          return f.centerId != null &&
+              graderCenters.contains(f.centerId.toString());
+        }
+
+        return true;
+      }, orElse: () => null);
 
       if (cached != null) {
         setState(() {
@@ -389,6 +400,11 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
     });
 
     try {
+      // Get current user info
+      final prefs = await SharedPreferences.getInstance();
+      final userType = prefs.getString('type');
+      final userId = prefs.getInt('user_id');
+
       final collection = MilkCollection(
         farmerId: int.parse(farmer!['farmerID'].toString()),
         date: DateFormat('yyyy-MM-dd').format(selectedDate),
@@ -399,6 +415,8 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
         center_name: farmer!['center_name'],
         fname: farmer!['fname'],
         lname: farmer!['lname'],
+        createdById: userId,
+        createdByType: userType,
       );
 
       // Save offline
@@ -425,54 +443,25 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
     }
   }
 
-  /// Auto-print receipt after saving collection
+  /// Auto-print receipt after saving collection - OPTIMIZED for speed
   Future<void> _autoPrintReceipt(MilkCollection collection) async {
+    // Fire-and-forget approach: don't await, print in background
+    _printInBackground(collection);
+  }
+
+  /// Background printing - won't block UI
+  Future<void> _printInBackground(MilkCollection collection) async {
     try {
-      // Use downloaded totals from server + add only unsynced local collections
-      final today = DateTime.now();
-      final todayStr = DateFormat('yyyy-MM-dd').format(today);
+      // Use cached totals if available (from API response)
+      // This is much faster than scanning all Hive records
+      final currentTotal =
+          collection.morning + collection.evening - collection.rejected;
 
-      double todayTotal = 0;
-      double additionalMonthly = 0;
-      double additionalYearly = 0;
-
-      // Only add unsynced (offline) collections to the server totals
-      final box = Hive.box<MilkCollection>('milk_collections');
-      for (var record in box.values) {
-        if (record.farmerId == collection.farmerId && !record.isSynced) {
-          final recordDate = DateTime.tryParse(record.date);
-          if (recordDate != null) {
-            final recordTotal =
-                record.morning + record.evening - record.rejected;
-
-            // Today's total
-            if (DateFormat('yyyy-MM-dd').format(recordDate) == todayStr) {
-              todayTotal += recordTotal;
-            }
-
-            // Monthly additions
-            if (recordDate.year == today.year &&
-                recordDate.month == today.month) {
-              additionalMonthly += recordTotal;
-            }
-
-            // Yearly additions
-            if (recordDate.year == today.year) {
-              additionalYearly += recordTotal;
-            }
-          }
-        }
-      }
-
-      // Downloaded totals + unsynced additions
-      final monthTotal = monthlyTotal + additionalMonthly;
-      final yearTotal = yearlyTotal + additionalYearly;
-
-      // Get company name from SharedPreferences
+      // Get company name (cached)
       final prefs = await SharedPreferences.getInstance();
       final companyName = prefs.getString('company_name');
 
-      // Build receipt data with all totals
+      // Build receipt data using already-available data
       final receiptData = {
         'farmerID': collection.farmerId.toString(),
         'fname': collection.fname,
@@ -482,16 +471,16 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
         'morning': collection.morning.toString(),
         'evening': collection.evening.toString(),
         'rejected': collection.rejected.toString(),
-        'total': (collection.morning + collection.evening - collection.rejected)
-            .toString(),
-        'today_total': todayTotal.toStringAsFixed(2),
+        'total': currentTotal.toStringAsFixed(2),
+        // Use pre-calculated totals from farmer search (much faster)
+        'today_total': todaysTotal.toStringAsFixed(2),
         'monthly_total': monthlyTotal.toStringAsFixed(2),
         'yearly_total': yearlyTotal.toStringAsFixed(2),
         'company_name': companyName,
       };
 
-      final receiptWidget = ReceiptBuilder.milkReceipt(receiptData);
-      await PrinterService.printWithRetry(receiptWidget, context, retries: 2);
+      // Use direct ESC/POS printing - bypasses widget rendering delays
+      await PrinterService.printDirectlyFast(receiptData, context);
     } catch (e) {
       // Silent fail - don't interrupt the save flow
       print('Auto-print failed: $e');

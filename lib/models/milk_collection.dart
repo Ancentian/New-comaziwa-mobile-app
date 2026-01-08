@@ -34,6 +34,12 @@ class MilkCollection extends HiveObject {
   @HiveField(9)
   int? serverId; // ID from server after sync
 
+  @HiveField(10)
+  int? createdById; // ID of user/employee who created this record
+
+  @HiveField(11)
+  String? createdByType; // Type: 'admin', 'user', 'employee', 'grader'
+
   MilkCollection({
     required this.farmerId,
     required this.date,
@@ -45,6 +51,8 @@ class MilkCollection extends HiveObject {
     this.fname,
     this.lname,
     this.serverId,
+    this.createdById,
+    this.createdByType,
   });
 
   Map<String, dynamic> toJson() {
@@ -58,6 +66,8 @@ class MilkCollection extends HiveObject {
       "fname": fname,
       "lname": lname,
       "server_id": serverId,
+      "created_by_id": createdById,
+      "created_by_type": createdByType,
     };
   }
 
@@ -74,6 +84,8 @@ class MilkCollection extends HiveObject {
       fname: json['fname'],
       lname: json['lname'],
       serverId: json['id'],
+      createdById: json['created_by_id'],
+      createdByType: json['created_by_type'],
     );
   }
 }

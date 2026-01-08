@@ -91,19 +91,26 @@ class FarmerService {
 
       print('📦 Received ${farmersList.length} farmers from API');
 
+      // ℹ️ Download ALL farmers for offline access
+      // Any milk grader can serve any farmer, so no filtering during sync
+      // View restrictions apply only when viewing milk collections
+      print('✅ Downloading all farmers - no filtering applied');
+
       final box = Hive.box<Farmer>('farmers');
       final oldCount = box.length;
 
       await box.clear();
       print('🗑️ Cleared $oldCount old farmers from Hive');
 
+      // Save all farmers to Hive
+      int savedCount = 0;
       for (var f in farmersList) {
         final farmer = Farmer.fromJson(Map<String, dynamic>.from(f));
-        
         box.put(farmer.farmerId, farmer);
+        savedCount++;
       }
 
-      print('✅ Saved ${box.length} farmers to Hive');
+      print('✅ Saved $savedCount farmers to Hive');
       Fluttertoast.showToast(
         msg: "Synced ${box.length} farmers",
         backgroundColor: Colors.green,

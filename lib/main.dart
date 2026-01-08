@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:hive_flutter/hive_flutter.dart';
+import 'package:provider/provider.dart';
 import 'screens/login_page.dart';
 import 'screens/dashboard_page.dart';
 import 'screens/milk_collection_page.dart';
 import 'screens/milk_list_page.dart';
 import 'screens/farmers_list_page.dart';
 import 'screens/profile_page.dart';
+import 'screens/daily_collection_summary_page.dart';
+import 'utils/theme_provider.dart';
 
 import 'models/farmer.dart';
 import 'models/milk_collection.dart';
@@ -51,7 +54,7 @@ Future<void> main() async {
 /// Check schema version and migrate data if structure changed
 Future<void> _checkAndMigrateSchema() async {
   const currentSchemaVersion =
-      2; // Incremented for monthlyTotal/yearlyTotal fields
+      3; // Incremented for createdById/createdByType fields in MilkCollection
 
   final prefs = await Hive.openBox('app_prefs');
   final savedVersion = prefs.get('schema_version', defaultValue: 1);
@@ -88,31 +91,32 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      title: 'Milk App',
-      theme: ThemeData(
-        scaffoldBackgroundColor: const Color(0xFFF8F9FA),
-        appBarTheme: const AppBarTheme(
-          backgroundColor: Color(0xFF0D773E),
-          foregroundColor: Colors.white,
-          elevation: 0,
-        ),
-        colorScheme: const ColorScheme.light(
-          primary: Color(0xFF0D773E),
-          secondary: Color(0xFF2ECC71),
-        ),
+    return ChangeNotifierProvider(
+      create: (_) => ThemeProvider(),
+      child: Consumer<ThemeProvider>(
+        builder: (context, themeProvider, child) {
+          return MaterialApp(
+            debugShowCheckedModeBanner: false,
+            title: 'Comaziwa App',
+            theme: themeProvider.lightTheme,
+            darkTheme: themeProvider.darkTheme,
+            themeMode: themeProvider.isDarkMode
+                ? ThemeMode.dark
+                : ThemeMode.light,
+            home: const LoginPage(),
+            routes: {
+              '/dashboard': (context) => DashboardPage(name: ''),
+              '/profile': (context) =>
+                  ProfilePage(name: '', email: '', phone: '', role: ''),
+              '/milkCollection': (context) => const MilkCollectionPage(),
+              '/milkList': (context) => const MilkListPage(),
+              '/farmersList': (context) => const FarmersListPage(),
+              '/dailySummary': (context) => const DailyCollectionSummaryPage(),
+              '/login': (context) => const LoginPage(),
+            },
+          );
+        },
       ),
-      home: const LoginPage(),
-      routes: {
-        '/dashboard': (context) => DashboardPage(name: ''),
-        '/profile': (context) =>
-            ProfilePage(name: '', email: '', phone: '', role: ''),
-        '/milkCollection': (context) => const MilkCollectionPage(),
-        '/milkList': (context) => const MilkListPage(),
-        '/farmersList': (context) => const FarmersListPage(),
-        '/login': (context) => const LoginPage(),
-      },
     );
   }
 }
