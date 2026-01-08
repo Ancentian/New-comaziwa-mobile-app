@@ -431,8 +431,14 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
       );
 
       // Auto-print receipt if enabled
-      if (AutoPrintService.isAutoPrintEnabled()) {
+      final isAutoPrintOn = AutoPrintService.isAutoPrintEnabled();
+      print('🖨️ Auto-print enabled: $isAutoPrintOn');
+
+      if (isAutoPrintOn) {
+        print('🖨️ Starting auto-print for farmer ${collection.farmerId}');
         _autoPrintReceipt(collection);
+      } else {
+        print('⚠️ Auto-print is disabled in settings');
       }
 
       _resetForm();
@@ -445,6 +451,7 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
 
   /// Auto-print receipt after saving collection - OPTIMIZED for speed
   Future<void> _autoPrintReceipt(MilkCollection collection) async {
+    print('🖨️ _autoPrintReceipt called');
     // Fire-and-forget approach: don't await, print in background
     _printInBackground(collection);
   }
@@ -452,6 +459,8 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
   /// Background printing - won't block UI
   Future<void> _printInBackground(MilkCollection collection) async {
     try {
+      print('🖨️ Starting background print...');
+
       // Use cached totals if available (from API response)
       // This is much faster than scanning all Hive records
       final currentTotal =
@@ -460,7 +469,9 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
       // Get company name (cached)
       final prefs = await SharedPreferences.getInstance();
       final companyName = prefs.getString('company_name');
+      final servedBy = prefs.getString('name');
 
+      print('🖨️ Building receipt data...');
       // Build receipt data using already-available data
       final receiptData = {
         'farmerID': collection.farmerId.toString(),
@@ -477,13 +488,26 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
         'monthly_total': monthlyTotal.toStringAsFixed(2),
         'yearly_total': yearlyTotal.toStringAsFixed(2),
         'company_name': companyName,
+        'served_by': servedBy,
       };
 
+      print('🖨️ Calling PrinterService.printDirectlyFast...');
       // Use direct ESC/POS printing - bypasses widget rendering delays
-      await PrinterService.printDirectlyFast(receiptData, context);
-    } catch (e) {
+      final result = await PrinterService.printDirectlyFast(
+        receiptData,
+        context,
+      );
+      print('🖨️ Print result: $result');
+
+      if (result) {
+        print('✅ Auto-print initiated successfully');
+      } else {
+        print('⚠️ Auto-print returned false - check printer connection');
+      }
+    } catch (e, stackTrace) {
       // Silent fail - don't interrupt the save flow
-      print('Auto-print failed: $e');
+      print('❌ Auto-print failed: $e');
+      print('Stack trace: $stackTrace');
     }
   }
 

@@ -942,9 +942,18 @@ class _DashboardPageState extends State<DashboardPage>
                     touchTooltipData: BarTouchTooltipData(
                       getTooltipItem: (group, groupIndex, rod, rodIndex) {
                         final idx = group.x.toInt();
-                        final dateLabel = (idx >= 0 && idx < limitedData.length)
-                            ? (limitedData[idx]['date']?.toString() ?? '')
-                            : '';
+                        if (idx < 0 || idx >= limitedData.length) {
+                          return null;
+                        }
+                        final rawDate =
+                            limitedData[idx]['date']?.toString() ?? '';
+                        String dateLabel;
+                        try {
+                          final d = DateTime.parse(rawDate);
+                          dateLabel = DateFormat('MMM dd, yyyy').format(d);
+                        } catch (_) {
+                          dateLabel = rawDate;
+                        }
                         return BarTooltipItem(
                           "$dateLabel\n${rod.toY.toStringAsFixed(2)} L",
                           const TextStyle(color: Colors.white),

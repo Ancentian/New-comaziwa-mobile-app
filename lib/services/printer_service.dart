@@ -408,14 +408,28 @@ class PrinterService {
     BuildContext context,
   ) async {
     try {
+      print('🖨️ printDirectlyFast called');
+
       // Get printer address quickly (no connection check)
       if (_printerAddress == null) {
+        print('🖨️ _printerAddress is null, checking AutoPrintService...');
+
         if (AutoPrintService.isAutoPrintEnabled()) {
+          print('🖨️ AutoPrintService is enabled');
           final printerAddress = AutoPrintService.getDefaultPrinterAddress();
+          print('🖨️ Default printer address: $printerAddress');
+
           if (printerAddress != null) {
             _printerAddress = _normalizeMacAddress(printerAddress);
+            print('🖨️ Normalized printer address: $_printerAddress');
+          } else {
+            print('⚠️ No default printer address found');
           }
+        } else {
+          print('⚠️ AutoPrintService is not enabled');
         }
+      } else {
+        print('🖨️ Using cached printer address: $_printerAddress');
       }
 
       if (_printerAddress == null) {
@@ -423,8 +437,10 @@ class PrinterService {
         return false;
       }
 
+      print('🖨️ Building ESC/POS bytes...');
       // Build and send immediately - no delays or connection tests
       final bytes = buildMilkReceiptEscPos(receiptData);
+      print('🖨️ Built ${bytes.length} bytes, sending to printer...');
 
       // Fire and forget - don't wait for response
       FlutterBluetoothPrinter.printBytes(
@@ -457,38 +473,30 @@ class PrinterService {
   static Uint8List buildMilkReceiptEscPos(Map<String, dynamic> data) {
     final out = <int>[];
 
-    // Initialize printer with CP437 codepage and Font A (12x24)
+    // Initialize printer
     out.addAll(escInit());
     out.addAll(escSelectCP437());
     out.addAll(escFontA());
     out.addAll(escNormalSize());
-    out.addAll(escNewLine(1));
 
     // ============ HEADER ============
     out.addAll(escAlignCenter());
-    out.addAll(escDoubleHeight());
     out.addAll(escBoldOn());
-    out.addAll(_bytesFromString('MILK COLLECTION\n'));
-    out.addAll(_bytesFromString('RECEIPT\n'));
+    out.addAll(_bytesFromString('MILK COLLECTION RECEIPT\n'));
     out.addAll(escBoldOff());
-    out.addAll(escNormalSize());
-    out.addAll(escNewLine(1));
 
     // Company Name
     if (data['company_name'] != null) {
-      out.addAll(escDoubleWidth());
       out.addAll(escBoldOn());
       out.addAll(_bytesFromString('${data['company_name']}\n'));
       out.addAll(escBoldOff());
-      out.addAll(escNormalSize());
     }
 
     // Address & Contact
     out.addAll(_bytesFromString('P.O BOX 297-60100\n'));
     out.addAll(_bytesFromString('EMBU, KENYA\n'));
     out.addAll(_bytesFromString('Tel: 0743935667\n'));
-    out.addAll(escNewLine(1));
-    out.addAll(escDoubleLine());
+    out.addAll(escSingleLine());
 
     // ============ FARMER INFO ============
     out.addAll(escAlignLeft());
@@ -496,32 +504,15 @@ class PrinterService {
     out.addAll(
       _bytesFromString('Date: ${_formatDate(data['collection_date'])}\n'),
     );
-    out.addAll(escBoldOff());
     out.addAll(_bytesFromString('Center: ${data['center_name'] ?? 'N/A'}\n'));
-    out.addAll(escNewLine(1));
-
-    // Farmer Name (larger)
-    out.addAll(escDoubleHeight());
-    out.addAll(escBoldOn());
     out.addAll(
       _bytesFromString('${data['fname'] ?? ''} ${data['lname'] ?? ''}\n'),
     );
     out.addAll(escBoldOff());
-    out.addAll(escNormalSize());
-
     out.addAll(_bytesFromString('Member No: ${data['farmerID'] ?? 'N/A'}\n'));
-    out.addAll(escNewLine(1));
-    out.addAll(escSingleLine());
+    out.addAll(escDashedLine());
 
-    // ============ COLLECTION DETAILS ============
-    out.addAll(escAlignCenter());
-    out.addAll(escBoldOn());
-    out.addAll(_bytesFromString('COLLECTION DETAILS\n'));
-    out.addAll(escBoldOff());
-    out.addAll(escAlignLeft());
-    out.addAll(escNewLine(1));
-
-    // Format as table
+    // ============ COLLECTION DATA ============
     out.addAll(
       _bytesFromString(
         'Morning Milk:        ${_padRight(data['morning']?.toString() ?? '0', 6)} L\n',
@@ -539,30 +530,28 @@ class PrinterService {
     );
     out.addAll(escDashedLine());
 
-    // Total (emphasized)
-    out.addAll(escDoubleHeight());
+    // Total
     out.addAll(escBoldOn());
-    final total =
-        ((data['morning'] ?? 0) +
-        (data['evening'] ?? 0) -
-        (data['rejected'] ?? 0));
-    out.addAll(_bytesFromString('TOTAL: ${total.toStringAsFixed(1)} L\n'));
+    final morning = double.tryParse(data['morning']?.toString() ?? '0') ?? 0.0;
+    final evening = double.tryParse(data['evening']?.toString() ?? '0') ?? 0.0;
+    final rejected =
+        double.tryParse(data['rejected']?.toString() ?? '0') ?? 0.0;
+    final total = morning + evening - rejected;
+    out.addAll(
+      _bytesFromString(
+        'TOTAL:               ${_padRight(total.toStringAsFixed(1), 6)} L\n',
+      ),
+    );
     out.addAll(escBoldOff());
-    out.addAll(escNormalSize());
-    out.addAll(escNewLine(1));
-    out.addAll(escDoubleLine());
+    out.addAll(escSingleLine());
 
     // ============ SUMMARY ============
     out.addAll(escAlignCenter());
     out.addAll(escBoldOn());
-    out.addAll(escDoubleWidth());
     out.addAll(_bytesFromString('SUMMARY\n'));
     out.addAll(escBoldOff());
-    out.addAll(escNormalSize());
     out.addAll(escAlignLeft());
-    out.addAll(escNewLine(1));
 
-    out.addAll(escBoldOn());
     out.addAll(
       _bytesFromString(
         'Today\'s Total:      ${_padRight(data['today_total']?.toString() ?? data['total']?.toString() ?? '0', 7)} L\n',
@@ -578,28 +567,24 @@ class PrinterService {
         'Yearly Total:       ${_padRight(data['yearly_total']?.toString() ?? '0', 7)} L\n',
       ),
     );
-    out.addAll(escBoldOff());
-    out.addAll(escNewLine(1));
-    out.addAll(escDoubleLine());
+
+    // Served by
+    if (data['served_by'] != null && data['served_by'].toString().isNotEmpty) {
+      out.addAll(escNewLine(1));
+      out.addAll(_bytesFromString('Served by: ${data['served_by']}\n'));
+    }
+
+    out.addAll(escSingleLine());
 
     // ============ FOOTER ============
     out.addAll(escAlignCenter());
-    out.addAll(escNewLine(1));
-    out.addAll(escDoubleHeight());
     out.addAll(escBoldOn());
-    out.addAll(_bytesFromString('Dairy Cow,\n'));
-    out.addAll(_bytesFromString('Daily Wealth!\n'));
+    out.addAll(_bytesFromString('Dairy Cow, Daily Wealth!\n'));
     out.addAll(escBoldOff());
-    out.addAll(escNormalSize());
-    out.addAll(escNewLine(1));
-
-    // Thank you message
-    out.addAll(_bytesFromString('Thank you for your business\n'));
-    out.addAll(escNewLine(1));
     out.addAll(_bytesFromString('${_formatDateTime(DateTime.now())}\n'));
 
-    // Extra spacing and cut
-    out.addAll(escNewLine(4));
+    // Cut with padding
+    out.addAll(escNewLine(3));
     out.addAll(escCut());
 
     return Uint8List.fromList(out);
