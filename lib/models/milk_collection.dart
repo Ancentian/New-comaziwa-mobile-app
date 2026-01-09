@@ -40,6 +40,9 @@ class MilkCollection extends HiveObject {
   @HiveField(11)
   String? createdByType; // Type: 'admin', 'user', 'employee', 'grader'
 
+  @HiveField(12)
+  String? memberNo; // The member number/display ID like "F001" from farmers.farmerID
+
   MilkCollection({
     required this.farmerId,
     required this.date,
@@ -53,6 +56,7 @@ class MilkCollection extends HiveObject {
     this.serverId,
     this.createdById,
     this.createdByType,
+    this.memberNo,
   });
 
   Map<String, dynamic> toJson() {
@@ -68,6 +72,7 @@ class MilkCollection extends HiveObject {
       "server_id": serverId,
       "created_by_id": createdById,
       "created_by_type": createdByType,
+      "member_no": memberNo,
     };
   }
 

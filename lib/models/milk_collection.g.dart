@@ -29,13 +29,14 @@ class MilkCollectionAdapter extends TypeAdapter<MilkCollection> {
       serverId: fields[9] as int?,
       createdById: fields[10] as int?,
       createdByType: fields[11] as String?,
+      memberNo: fields[12] as String?,
     );
   }
 
   @override
   void write(BinaryWriter writer, MilkCollection obj) {
     writer
-      ..writeByte(12)
+      ..writeByte(13)
       ..writeByte(0)
       ..write(obj.farmerId)
       ..writeByte(1)
@@ -59,7 +60,9 @@ class MilkCollectionAdapter extends TypeAdapter<MilkCollection> {
       ..writeByte(10)
       ..write(obj.createdById)
       ..writeByte(11)
-      ..write(obj.createdByType);
+      ..write(obj.createdByType)
+      ..writeByte(12)
+      ..write(obj.memberNo);
   }
 
   @override

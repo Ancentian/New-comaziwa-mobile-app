@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'dart:convert';
 import 'package:fluttertoast/fluttertoast.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -22,12 +23,33 @@ class _LoginPageState extends State<LoginPage> {
   final _passwordController = TextEditingController();
   bool _isLoading = false;
   bool _obscurePassword = true;
+  bool _rememberMe = false;
   String _appVersion = '';
 
   @override
   void initState() {
     super.initState();
     _loadAppVersion();
+    _loadSavedCredentials();
+  }
+
+  Future<void> _loadSavedCredentials() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedEmail = prefs.getString('saved_email');
+      final savedPassword = prefs.getString('saved_password');
+      final rememberMe = prefs.getBool('remember_me') ?? false;
+
+      if (rememberMe && savedEmail != null && savedPassword != null) {
+        setState(() {
+          _emailController.text = savedEmail;
+          _passwordController.text = savedPassword;
+          _rememberMe = true;
+        });
+      }
+    } catch (e) {
+      print('Failed to load saved credentials: $e');
+    }
   }
 
   Future<void> _loadAppVersion() async {
@@ -170,6 +192,20 @@ class _LoginPageState extends State<LoginPage> {
         final prefs = await SharedPreferences.getInstance();
 
         // -----------------------------
+        // 🔥 SAVE CREDENTIALS IF REMEMBER ME IS CHECKED
+        // -----------------------------
+        if (_rememberMe) {
+          await prefs.setString('saved_email', email);
+          await prefs.setString('saved_password', password);
+          await prefs.setBool('remember_me', true);
+        } else {
+          // Clear saved credentials if remember me is unchecked
+          await prefs.remove('saved_email');
+          await prefs.remove('saved_password');
+          await prefs.setBool('remember_me', false);
+        }
+
+        // -----------------------------
         // 🔥 SAVE TOKEN
         // -----------------------------
         await prefs.setString('token', data['token']);
@@ -236,6 +272,12 @@ class _LoginPageState extends State<LoginPage> {
           backgroundColor: Colors.green,
           textColor: Colors.white,
         );
+
+        // -----------------------------
+        // 🔥 COMMIT AUTOFILL FOR PASSWORD MANAGER
+        // -----------------------------
+        // This tells the system to save the credentials to Google Password Manager
+        TextInput.finishAutofillContext(shouldSave: true);
 
         // -----------------------------
         // 🔥 GO TO DASHBOARD
@@ -379,43 +421,106 @@ class _LoginPageState extends State<LoginPage> {
                           ),
                           const SizedBox(height: 32),
 
-                          TextField(
-                            controller: _emailController,
-                            decoration: InputDecoration(
-                              labelText: "Email Address",
-                              border: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(10),
-                              ),
-                              prefixIcon: const Icon(Icons.email_outlined),
-                            ),
-                            keyboardType: TextInputType.emailAddress,
-                          ),
-                          const SizedBox(height: 16),
-
-                          TextField(
-                            controller: _passwordController,
-                            obscureText: _obscurePassword,
-                            decoration: InputDecoration(
-                              labelText: "Password",
-                              border: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(10),
-                              ),
-                              prefixIcon: const Icon(Icons.lock_outline),
-                              suffixIcon: IconButton(
-                                icon: Icon(
-                                  _obscurePassword
-                                      ? Icons.visibility
-                                      : Icons.visibility_off,
+                          AutofillGroup(
+                            child: Column(
+                              children: [
+                                TextField(
+                                  controller: _emailController,
+                                  autofillHints: const [
+                                    AutofillHints.email,
+                                    AutofillHints.username,
+                                  ],
+                                  textInputAction: TextInputAction.next,
+                                  keyboardType: TextInputType.emailAddress,
+                                  autocorrect: false,
+                                  enableSuggestions: false,
+                                  decoration: InputDecoration(
+                                    labelText: "Email Address",
+                                    hintText: "your@email.com",
+                                    border: OutlineInputBorder(
+                                      borderRadius: BorderRadius.circular(10),
+                                    ),
+                                    prefixIcon: const Icon(
+                                      Icons.email_outlined,
+                                    ),
+                                  ),
+                                  onSubmitted: (_) {
+                                    // Focus on password field when email is submitted
+                                    FocusScope.of(context).nextFocus();
+                                  },
                                 ),
-                                onPressed: () {
+                                const SizedBox(height: 16),
+
+                                TextField(
+                                  controller: _passwordController,
+                                  autofillHints: const [AutofillHints.password],
+                                  obscureText: _obscurePassword,
+                                  textInputAction: TextInputAction.done,
+                                  autocorrect: false,
+                                  enableSuggestions: false,
+                                  decoration: InputDecoration(
+                                    labelText: "Password",
+                                    hintText: "Enter your password",
+                                    border: OutlineInputBorder(
+                                      borderRadius: BorderRadius.circular(10),
+                                    ),
+                                    prefixIcon: const Icon(Icons.lock_outline),
+                                    suffixIcon: IconButton(
+                                      icon: Icon(
+                                        _obscurePassword
+                                            ? Icons.visibility
+                                            : Icons.visibility_off,
+                                      ),
+                                      onPressed: () {
+                                        setState(() {
+                                          _obscurePassword = !_obscurePassword;
+                                        });
+                                      },
+                                    ),
+                                  ),
+                                  onSubmitted: (_) {
+                                    // Trigger login when password is submitted
+                                    if (!_isLoading) {
+                                      login();
+                                    }
+                                  },
+                                ),
+                              ],
+                            ),
+                          ),
+
+                          const SizedBox(height: 8),
+
+                          // Remember Me Checkbox
+                          Row(
+                            children: [
+                              Checkbox(
+                                value: _rememberMe,
+                                onChanged: (value) {
                                   setState(() {
-                                    _obscurePassword = !_obscurePassword;
+                                    _rememberMe = value ?? false;
                                   });
                                 },
+                                activeColor: Colors.green.shade700,
                               ),
-                            ),
+                              GestureDetector(
+                                onTap: () {
+                                  setState(() {
+                                    _rememberMe = !_rememberMe;
+                                  });
+                                },
+                                child: const Text(
+                                  "Remember my credentials",
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    color: Colors.black87,
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
-                          const SizedBox(height: 24),
+
+                          const SizedBox(height: 16),
 
                           _isLoading
                               ? Column(
