@@ -1,15 +1,13 @@
-import 'package:flutter/material.dart';
-import 'package:fluttertoast/fluttertoast.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'package:http/http.dart' as http;
+import 'dart:async';
 import 'dart:convert';
-import 'package:intl/intl.dart';
+import 'package:flutter/material.dart';
 import 'package:hive/hive.dart';
-
+import 'package:http/http.dart' as http;
+import 'package:intl/intl.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../config/app_config.dart';
 import '../models/milk_collection.dart';
 import '../services/printer_service.dart';
-import '../services/sync_service.dart';
 
 class MilkListPage extends StatefulWidget {
   const MilkListPage({super.key});
@@ -18,194 +16,164 @@ class MilkListPage extends StatefulWidget {
   State<MilkListPage> createState() => _MilkListPageState();
 }
 
-class _MilkListPageState extends State<MilkListPage>
-    with SingleTickerProviderStateMixin {
-  List<Map<String, dynamic>> milkList = [];
-  List<Map<String, dynamic>> filteredList = [];
+class _MilkListPageState extends State<MilkListPage> {
+  List<Map<String, dynamic>> collections = [];
+  List<Map<String, dynamic>> filteredCollections = [];
   bool isLoading = true;
-  bool hasError = false;
-  late String apiBase;
-
   String searchQuery = '';
   DateTime? startDate;
   DateTime? endDate;
-  Map<String, String> printStatus = {}; // Track print status per item ID
-
-  String? userType;
-  int? userId;
-
-  late AnimationController _controller;
-  late Animation<double> _animation;
+  Timer? _debounce;
 
   @override
   void initState() {
     super.initState();
-    apiBase = "${AppConfig.baseUrl}/api";
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 800),
-    );
-    _animation = CurvedAnimation(parent: _controller, curve: Curves.easeInOut);
-
-    DateTime now = DateTime.now();
-    startDate = DateTime(now.year, now.month, 1);
-    endDate = DateTime(now.year, now.month + 1, 0);
-
-    // Load user info and then fetch data
-    _loadUserInfo();
+    _loadCollections();
   }
 
-  /// Load user information for role-based filtering
-  Future<void> _loadUserInfo() async {
-    final prefs = await SharedPreferences.getInstance();
-    userType = prefs.getString('type');
-    userId = prefs.getInt('user_id');
-    print('👤 Milk List - User type: $userType, ID: $userId');
-
-    // Load from Hive (already synced on dashboard load)
-    fetchMilkList();
+  @override
+  void dispose() {
+    _debounce?.cancel();
+    super.dispose();
   }
 
-  /// Refresh data: sync from server then reload from Hive
-  Future<void> _refreshData() async {
-    Fluttertoast.showToast(
-      msg: "Syncing from server...",
-      backgroundColor: Colors.blue,
-      toastLength: Toast.LENGTH_SHORT,
-    );
+  /// Load collections from Hive (offline-first)
+  Future<void> _loadCollections() async {
+    setState(() => isLoading = true);
 
-    await SyncService().downloadMilkCollections();
-    await fetchMilkList();
+    try {
+      final box = Hive.box<MilkCollection>('milk_collections');
 
-    Fluttertoast.showToast(
-      msg: "Data refreshed",
-      backgroundColor: Colors.green,
-      toastLength: Toast.LENGTH_SHORT,
-    );
-  }
-
-  Future<String?> _getAuthToken() async {
-    final prefs = await SharedPreferences.getInstance();
-    return prefs.getString('token');
-  }
-
-  /// Fetch milk records from Hive (includes both locally created and synced from server)
-  Future<void> fetchMilkList() async {
-    setState(() {
-      isLoading = true;
-      hasError = false;
-    });
-
-    List<Map<String, dynamic>> combinedList = [];
-
-    // Load all records from Hive (includes locally created + synced from server)
-    final box = Hive.box<MilkCollection>('milk_collections');
-
-    print("📊 Loading ${box.length} records from Hive");
-
-    var allRecords = box.values.toList();
-
-    // Apply role-based filtering
-    // Only employees (graders) can only see records they created
-    // Users, admins, and owners can see all records
-    if (userType != null &&
-        (userType == 'employee' || userType == 'grader') &&
-        userId != null) {
-      allRecords = allRecords.where((e) {
-        return e.createdById == userId;
+      // Map Hive collections to display format
+      final records = box.values.map((e) {
+        return {
+          'id': e.serverId ?? 0,
+          'farmer_id': e.farmerId, // Numeric DB ID
+          'farmerID':
+              e.memberNo ?? e.farmerId.toString(), // Display member number
+          'fname': e.fname ?? '',
+          'lname': e.lname ?? '',
+          'center_name': e.center_name ?? 'N/A',
+          'collection_date': e.date,
+          'morning': e.morning,
+          'evening': e.evening,
+          'rejected': e.rejected,
+          'total': e.morning + e.evening - e.rejected,
+          'is_synced': e.isSynced,
+        };
       }).toList();
-      print(
-        '🔒 Employee - filtered to ${allRecords.length} collections for user $userId',
-      );
-    } else {
-      print(
-        '👑 User/Admin/Owner - showing all ${allRecords.length} collections',
-      );
+
+      // Sort by date (newest first)
+      records.sort((a, b) {
+        final dateA = a['collection_date'] as String;
+        final dateB = b['collection_date'] as String;
+        return dateB.compareTo(dateA);
+      });
+
+      setState(() {
+        collections = records;
+        filteredCollections = records;
+        isLoading = false;
+      });
+    } catch (e) {
+      print('Error loading collections: $e');
+      setState(() => isLoading = false);
     }
-
-    final mappedRecords = allRecords.map((e) {
-      return {
-        'id': e.serverId != null ? 'server_${e.serverId}' : 'local_${e.key}',
-        'server_id': e.serverId, // Track server ID
-        'farmerID': e.farmerId,
-        'collection_date': e.date,
-        'morning': e.morning,
-        'evening': e.evening,
-        'rejected': e.rejected,
-        'total': e.morning + e.evening - e.rejected,
-        'center_name': e.center_name ?? 'N/A',
-        'is_synced': e.isSynced,
-        'hiveKey': e.key,
-        'fname': e.fname ?? '',
-        'lname': e.lname ?? '',
-      };
-    }).toList();
-
-    combinedList.addAll(mappedRecords);
-
-    print("✅ Loaded ${combinedList.length} total records (synced + local)");
-
-    milkList = combinedList;
-    _applyFilters();
-    _controller.forward();
-    setState(() => isLoading = false);
   }
 
-  void _applyFilters() {
-    setState(() {
-      filteredList = milkList.where((item) {
-        final nameMatch = "${item['fname'] ?? ''} ${item['lname'] ?? ''}"
-            .toLowerCase()
-            .contains(searchQuery.toLowerCase());
-        final idMatch = (item['farmerID'] ?? '')
-            .toString()
-            .toLowerCase()
-            .contains(searchQuery.toLowerCase());
+  /// Sync collections from server
+  Future<void> _syncFromServer() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString('token');
+      final tenantId = prefs.getInt('tenant_id');
 
-        final date = DateTime.tryParse(item['collection_date'] ?? '');
-        final dateMatch =
-            (startDate == null ||
-                (date != null && !date.isBefore(startDate!))) &&
-            (endDate == null || (date != null && !date.isAfter(endDate!)));
+      if (token == null || tenantId == null) {
+        _showMessage('Login required', Colors.red);
+        return;
+      }
 
-        return (nameMatch || idMatch) && dateMatch;
-      }).toList();
+      setState(() => isLoading = true);
 
-      // Sort by date - latest first
-      filteredList.sort((a, b) {
-        final dateA =
-            DateTime.tryParse(a['collection_date'] ?? '') ?? DateTime(1970);
-        final dateB =
-            DateTime.tryParse(b['collection_date'] ?? '') ?? DateTime(1970);
-        return dateB.compareTo(dateA); // Descending order (latest first)
+      final response = await http.get(
+        Uri.parse(
+          '${AppConfig.baseUrl}/api/milk-collections-sync?tenant_id=$tenantId&limit=1000',
+        ),
+        headers: {'Authorization': 'Bearer $token'},
+      );
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        final syncedCollections = (data['data'] as List)
+            .map((item) => MilkCollection.fromJson(item))
+            .toList();
+
+        // Save to Hive
+        final box = Hive.box<MilkCollection>('milk_collections');
+        await box.clear(); // Clear old data
+        for (var collection in syncedCollections) {
+          await box.add(collection);
+        }
+
+        _showMessage(
+          'Synced ${syncedCollections.length} collections',
+          Colors.green,
+        );
+        await _loadCollections();
+      } else {
+        _showMessage('Sync failed', Colors.red);
+      }
+    } catch (e) {
+      print('Sync error: $e');
+      _showMessage('Sync error: Check connection', Colors.orange);
+    } finally {
+      setState(() => isLoading = false);
+    }
+  }
+
+  /// Filter collections by search query and date range
+  void _filterCollections() {
+    _debounce?.cancel();
+    _debounce = Timer(const Duration(milliseconds: 300), () {
+      setState(() {
+        filteredCollections = collections.where((item) {
+          // Search filter (by farmerID, name)
+          final matchesSearch =
+              searchQuery.isEmpty ||
+              item['farmerID'].toString().toLowerCase().contains(
+                searchQuery.toLowerCase(),
+              ) ||
+              '${item['fname']} ${item['lname']}'.toLowerCase().contains(
+                searchQuery.toLowerCase(),
+              );
+
+          // Date filter
+          final collectionDate = DateTime.parse(item['collection_date']);
+          final matchesDateRange =
+              (startDate == null ||
+                  collectionDate.isAfter(
+                    startDate!.subtract(const Duration(days: 1)),
+                  )) &&
+              (endDate == null ||
+                  collectionDate.isBefore(
+                    endDate!.add(const Duration(days: 1)),
+                  ));
+
+          return matchesSearch && matchesDateRange;
+        }).toList();
       });
     });
   }
 
-  double _getTotalLitres() {
-    double total = 0;
-    for (var item in filteredList) {
-      total += double.tryParse(item['total'].toString()) ?? 0;
-    }
-    return total;
-  }
-
-  Future<void> _selectDateRange() async {
+  /// Pick date range
+  Future<void> _pickDateRange() async {
     final picked = await showDateRangePicker(
       context: context,
-      firstDate: DateTime(2023),
-      lastDate: DateTime(2100),
+      firstDate: DateTime(2020),
+      lastDate: DateTime.now(),
       initialDateRange: startDate != null && endDate != null
           ? DateTimeRange(start: startDate!, end: endDate!)
           : null,
-      builder: (context, child) {
-        return Theme(
-          data: ThemeData.light().copyWith(
-            colorScheme: const ColorScheme.light(primary: Colors.green),
-          ),
-          child: child!,
-        );
-      },
     );
 
     if (picked != null) {
@@ -213,546 +181,475 @@ class _MilkListPageState extends State<MilkListPage>
         startDate = picked.start;
         endDate = picked.end;
       });
-      _applyFilters();
+      _filterCollections();
     }
   }
 
-  /// Sync single offline record
-  Future<bool> syncSingleCollection(int hiveKey) async {
-    final box = Hive.box<MilkCollection>('milk_collections');
-    final record = box.get(hiveKey);
-    if (record == null) return false;
+  /// Clear date filter
+  void _clearDateFilter() {
+    setState(() {
+      startDate = null;
+      endDate = null;
+    });
+    _filterCollections();
+  }
 
-    final token = await _getAuthToken();
-    if (token == null) return false;
-
+  /// Print receipt for a collection
+  Future<void> _printReceipt(Map<String, dynamic> collection) async {
     try {
-      final res = await http.post(
-        Uri.parse("$apiBase/store-milk-collection"),
-        headers: {
-          'Authorization': 'Bearer $token',
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-        },
-        body: json.encode(record.toJson()),
+      final prefs = await SharedPreferences.getInstance();
+      final companyName = prefs.getString('company_name') ?? 'Comaziwa';
+
+      final receiptData = {
+        'farmerID': collection['farmerID'],
+        'fname': collection['fname'],
+        'lname': collection['lname'],
+        'center_name': collection['center_name'],
+        'collection_date': collection['collection_date'],
+        'morning': collection['morning'].toString(),
+        'evening': collection['evening'].toString(),
+        'rejected': collection['rejected'].toString(),
+        'total': collection['total'].toStringAsFixed(2),
+        'company_name': companyName,
+      };
+
+      final result = await PrinterService.printDirectlyFast(
+        receiptData,
+        context,
       );
 
-      if (res.statusCode == 200 || res.statusCode == 201) {
-        record.isSynced = true;
-        await box.put(hiveKey, record);
-        return true;
+      if (result) {
+        _showMessage('Printing...', Colors.green);
+      } else {
+        _showMessage('Printer not connected', Colors.orange);
       }
-      return false;
-    } catch (_) {
-      return false;
+    } catch (e) {
+      _showMessage('Print failed: $e', Colors.red);
     }
   }
 
-  int getUnsyncedCount() {
-    return milkList.where((item) => item['is_synced'] == false).length;
-  }
-
-  Widget _buildStatCard(
-    String title,
-    String value,
-    IconData icon,
-    Color color,
-  ) {
-    return FadeTransition(
-      opacity: _animation,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 500),
-        curve: Curves.easeInOut,
-        margin: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            colors: [color.withOpacity(0.7), color],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          ),
-          borderRadius: BorderRadius.circular(16),
-          boxShadow: [
-            BoxShadow(
-              color: color.withOpacity(0.4),
-              blurRadius: 8,
-              offset: const Offset(0, 4),
-            ),
-          ],
-        ),
-        child: Row(
-          children: [
-            CircleAvatar(
-              radius: 28,
-              backgroundColor: Colors.white,
-              child: Icon(icon, color: color, size: 28),
-            ),
-            const SizedBox(width: 16),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  value,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 22,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
+  void _showMessage(String message, Color color) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: color,
+        duration: const Duration(seconds: 2),
       ),
     );
-  }
-
-  /// Printing method with auto-print support
-  /// When auto-print is enabled, it uses the default printer automatically
-  /// When disabled, user is prompted to select a printer
-  Widget _buildPrintButton(Map<String, dynamic> item) {
-    final itemId = item['id'].toString();
-    final status = printStatus[itemId];
-
-    if (status == 'printing') {
-      return Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 8),
-        child: Center(
-          child: SizedBox(
-            width: 24,
-            height: 24,
-            child: CircularProgressIndicator(
-              strokeWidth: 2,
-              valueColor: AlwaysStoppedAnimation<Color>(Colors.blue[700]!),
-            ),
-          ),
-        ),
-      );
-    }
-
-    if (status == 'success') {
-      return Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 8),
-        child: Icon(Icons.check_circle, color: Colors.green[700], size: 24),
-      );
-    }
-
-    if (status == 'error') {
-      return Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 8),
-        child: InkWell(
-          onTap: () => _printReceipt(item),
-          child: Icon(Icons.error_outline, color: Colors.red[700], size: 24),
-        ),
-      );
-    }
-
-    return IconButton(
-      icon: const Icon(Icons.print, color: Colors.blue),
-      onPressed: () => _printReceipt(item),
-    );
-  }
-
-  Future<void> _printReceipt(Map<String, dynamic> item) async {
-    final itemId = item['id'].toString();
-
-    try {
-      // Set status to printing
-      setState(() {
-        printStatus[itemId] = 'printing';
-      });
-
-      // OPTIMIZED: Use cached data instead of recalculating from scratch
-      // The item already contains the farmer info we need
-      final farmerId = item['farmerID'];
-      final prefs = await SharedPreferences.getInstance();
-      final companyName = prefs.getString('company_name');
-
-      // Quick calculation: only scan local Hive for this farmer's totals
-      // This is faster than API call + full scan
-      final today = DateTime.now();
-      final todayStr = DateFormat('yyyy-MM-dd').format(today);
-      final currentYear = today.year;
-      final currentMonth = today.month;
-
-      double todayTotal = 0;
-      double monthlyTotal = 0;
-      double yearlyTotal = 0;
-
-      // Single pass through local data for this farmer only
-      final box = Hive.box<MilkCollection>('milk_collections');
-      for (var record in box.values) {
-        if (record.farmerId == farmerId) {
-          final recordDate = DateTime.tryParse(record.date);
-          if (recordDate != null && recordDate.year == currentYear) {
-            final recordTotal =
-                record.morning + record.evening - record.rejected;
-
-            if (DateFormat('yyyy-MM-dd').format(recordDate) == todayStr) {
-              todayTotal += recordTotal;
-            }
-            if (recordDate.month == currentMonth) {
-              monthlyTotal += recordTotal;
-            }
-            yearlyTotal += recordTotal;
-          }
-        }
-      }
-
-      print(
-        "✅ Quick totals: Today=$todayTotal, Monthly=$monthlyTotal, Yearly=$yearlyTotal",
-      );
-
-      // Add totals to item data
-      final enrichedItem = Map<String, dynamic>.from(item);
-      enrichedItem['today_total'] = todayTotal.toStringAsFixed(2);
-      enrichedItem['monthly_total'] = monthlyTotal.toStringAsFixed(2);
-      enrichedItem['yearly_total'] = yearlyTotal.toStringAsFixed(2);
-      enrichedItem['company_name'] = companyName;
-
-      // Use fast direct print - no waiting
-      PrinterService.printDirectlyFast(enrichedItem, context).then((ok) {
-        if (mounted) {
-          setState(() {
-            printStatus[itemId] = ok ? 'success' : 'error';
-          });
-
-          if (ok) {
-            Fluttertoast.showToast(
-              msg: "Print sent",
-              backgroundColor: Colors.green,
-              toastLength: Toast.LENGTH_SHORT,
-            );
-          } else {
-            Fluttertoast.showToast(
-              msg: "Print failed - check printer",
-              backgroundColor: Colors.red,
-              toastLength: Toast.LENGTH_SHORT,
-            );
-          }
-
-          // Clear status after 2 seconds
-          Future.delayed(const Duration(seconds: 2), () {
-            if (mounted) {
-              setState(() {
-                printStatus.remove(itemId);
-              });
-            }
-          });
-        }
-      });
-
-      // Return immediately - don't block UI
-    } catch (e) {
-      print("Print error: $e");
-      setState(() {
-        printStatus[itemId] = 'error';
-      });
-      Fluttertoast.showToast(
-        msg: "Print error",
-        backgroundColor: Colors.red,
-        toastLength: Toast.LENGTH_SHORT,
-      );
-
-      // Clear error status after 2 seconds
-      Future.delayed(const Duration(seconds: 2), () {
-        if (mounted) {
-          setState(() {
-            printStatus.remove(itemId);
-          });
-        }
-      });
-    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final totalLitres = _getTotalLitres().toStringAsFixed(2);
-
-    String rangeText = startDate != null && endDate != null
-        ? "${DateFormat('MM/dd/yyyy').format(startDate!)} - ${DateFormat('MM/dd/yyyy').format(endDate!)}"
-        : "Select Date Range";
+    final totalMilk = filteredCollections.fold<double>(
+      0,
+      (sum, item) => sum + (item['total'] as num).toDouble(),
+    );
 
     return Scaffold(
-      backgroundColor: const Color(0xFFF6F9FC),
       appBar: AppBar(
-        title: const Text("Milk Collections"),
-        backgroundColor: Colors.green,
-        elevation: 0,
+        title: const Text('Milk Collections'),
+        backgroundColor: Colors.green.shade700,
+        elevation: 2,
         actions: [
-          Stack(
-            alignment: Alignment.center,
-            children: [
-              IconButton(
-                icon: const Icon(Icons.sync_alt),
-                tooltip: 'Sync All',
-                onPressed: getUnsyncedCount() == 0
-                    ? null
-                    : () async {
-                        final unsynced = milkList.where(
-                          (item) => item['is_synced'] == false,
-                        );
-                        bool allSuccess = true;
-
-                        for (var item in unsynced) {
-                          final hiveKey = item['hiveKey'];
-                          if (hiveKey != null) {
-                            bool success = await syncSingleCollection(hiveKey);
-                            if (!success) allSuccess = false;
-                            if (success) {
-                              setState(() => item['is_synced'] = true);
-                            }
-                          }
-                        }
-
-                        Fluttertoast.showToast(
-                          msg: allSuccess
-                              ? "All collections synced"
-                              : "Some collections failed",
-                          backgroundColor: allSuccess
-                              ? Colors.green
-                              : Colors.red,
-                        );
-                      },
-              ),
-              Positioned(
-                right: 8,
-                top: 8,
-                child: AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 300),
-                  transitionBuilder: (child, animation) {
-                    return ScaleTransition(scale: animation, child: child);
-                  },
-                  child: getUnsyncedCount() > 0
-                      ? Container(
-                          key: ValueKey(getUnsyncedCount()),
-                          padding: const EdgeInsets.all(4),
-                          decoration: const BoxDecoration(
-                            color: Colors.red,
-                            shape: BoxShape.circle,
-                          ),
-                          constraints: const BoxConstraints(
-                            minWidth: 18,
-                            minHeight: 18,
-                          ),
-                          child: Text(
-                            '${getUnsyncedCount()}',
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 12,
-                              fontWeight: FontWeight.bold,
-                            ),
-                            textAlign: TextAlign.center,
-                          ),
-                        )
-                      : const SizedBox.shrink(),
-                ),
-              ),
-            ],
-          ),
           IconButton(
-            onPressed: _refreshData,
-            icon: const Icon(Icons.refresh),
-            tooltip: 'Sync & Refresh',
+            icon: const Icon(Icons.sync),
+            onPressed: _syncFromServer,
+            tooltip: 'Sync from server',
           ),
         ],
       ),
-      body: RefreshIndicator(
-        onRefresh: _refreshData,
-        child: isLoading
-            ? const Center(
-                child: CircularProgressIndicator(color: Colors.green),
-              )
-            : hasError
-            ? const Center(
-                child: Text(
-                  "Failed to load milk list. Please try again.",
-                  style: TextStyle(color: Colors.redAccent),
+      body: Column(
+        children: [
+          // Search and Filter Section
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.grey.withOpacity(0.1),
+                  blurRadius: 4,
+                  offset: const Offset(0, 2),
                 ),
-              )
-            : Column(
-                children: [
-                  // Search + Filter Row
-                  Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 8,
+              ],
+            ),
+            child: Column(
+              children: [
+                // Search Bar
+                TextField(
+                  onChanged: (value) {
+                    searchQuery = value;
+                    _filterCollections();
+                  },
+                  decoration: InputDecoration(
+                    hintText: 'Search by Farmer ID or Name',
+                    prefixIcon: Icon(
+                      Icons.search,
+                      color: Colors.green.shade700,
                     ),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: TextField(
-                            decoration: InputDecoration(
-                              hintText: 'Search by Farmer ID or Name',
-                              prefixIcon: const Icon(Icons.search),
-                              filled: true,
-                              fillColor: Colors.white,
-                              contentPadding: const EdgeInsets.symmetric(
-                                vertical: 4,
-                              ),
-                              border: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(12),
-                                borderSide: BorderSide.none,
-                              ),
-                            ),
-                            onChanged: (value) {
-                              setState(() => searchQuery = value);
-                              _applyFilters();
-                            },
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none,
+                    ),
+                    filled: true,
+                    fillColor: Colors.grey.shade100,
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 12,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+
+                // Date Filter Row
+                Row(
+                  children: [
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        onPressed: _pickDateRange,
+                        icon: const Icon(Icons.date_range, size: 18),
+                        label: Text(
+                          startDate != null && endDate != null
+                              ? '${DateFormat('MMM dd').format(startDate!)} - ${DateFormat('MMM dd').format(endDate!)}'
+                              : 'Select Date Range',
+                          style: const TextStyle(fontSize: 13),
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.green.shade50,
+                          foregroundColor: Colors.green.shade700,
+                          elevation: 0,
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(8),
+                            side: BorderSide(color: Colors.green.shade200),
                           ),
                         ),
-                        const SizedBox(width: 8),
-                        TextButton.icon(
-                          style: TextButton.styleFrom(
-                            backgroundColor: Colors.green.shade50,
+                      ),
+                    ),
+                    if (startDate != null || endDate != null) ...[
+                      const SizedBox(width: 8),
+                      IconButton(
+                        onPressed: _clearDateFilter,
+                        icon: const Icon(Icons.clear),
+                        color: Colors.red.shade700,
+                        tooltip: 'Clear filter',
+                      ),
+                    ],
+                  ],
+                ),
+              ],
+            ),
+          ),
+
+          // Summary Card
+          Container(
+            padding: const EdgeInsets.all(16),
+            color: Colors.green.shade50,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Total Collections',
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: Colors.grey.shade700,
+                      ),
+                    ),
+                    Text(
+                      '${filteredCollections.length}',
+                      style: TextStyle(
+                        fontSize: 24,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.green.shade700,
+                      ),
+                    ),
+                  ],
+                ),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text(
+                      'Total Milk',
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: Colors.grey.shade700,
+                      ),
+                    ),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        Text(
+                          totalMilk.toStringAsFixed(1),
+                          style: TextStyle(
+                            fontSize: 24,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.green.shade700,
                           ),
-                          onPressed: _selectDateRange,
-                          icon: const Icon(
-                            Icons.filter_alt_rounded,
-                            color: Colors.green,
-                          ),
-                          label: Text(
-                            rangeText,
-                            style: const TextStyle(color: Colors.green),
+                        ),
+                        const SizedBox(width: 4),
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 4),
+                          child: Text(
+                            'L',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
+                              color: Colors.green.shade600,
+                            ),
                           ),
                         ),
                       ],
                     ),
-                  ),
-                  _buildStatCard(
-                    "Total Milk Collected",
-                    "$totalLitres L",
-                    Icons.local_drink,
-                    Colors.green,
-                  ),
-                  Expanded(
-                    child: filteredList.isEmpty
-                        ? const Center(child: Text("No milk records found."))
-                        : ListView.builder(
-                            padding: const EdgeInsets.all(12),
-                            itemCount: filteredList.length,
-                            itemBuilder: (context, index) {
-                              final item = filteredList[index];
-                              return AnimatedContainer(
-                                duration: const Duration(milliseconds: 300),
-                                curve: Curves.easeInOut,
-                                margin: const EdgeInsets.only(bottom: 10),
-                                decoration: BoxDecoration(
-                                  color: Colors.white,
-                                  borderRadius: BorderRadius.circular(16),
-                                  boxShadow: [
-                                    BoxShadow(
-                                      color: Colors.grey.withOpacity(0.2),
-                                      blurRadius: 6,
-                                      offset: const Offset(0, 3),
-                                    ),
-                                  ],
-                                ),
-                                child: ListTile(
-                                  leading: CircleAvatar(
-                                    radius: 24,
-                                    backgroundColor: Colors.green.shade100,
-                                    child: const Icon(
-                                      Icons.local_drink,
-                                      color: Colors.green,
-                                    ),
-                                  ),
-                                  title: Text(
-                                    "${item['farmerID']} - ${item['fname']} ${item['lname']}",
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 16,
-                                    ),
-                                  ),
-                                  subtitle: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      const SizedBox(height: 4),
-                                      Text(
-                                        "Date: ${item['collection_date'] ?? 'N/A'}",
-                                        style: const TextStyle(
-                                          fontSize: 14,
-                                          color: Colors.grey,
-                                        ),
-                                      ),
-                                      Text(
-                                        "Center: ${item['center_name'] ?? 'N/A'}",
-                                        style: const TextStyle(
-                                          fontSize: 14,
-                                          color: Colors.grey,
-                                        ),
-                                      ),
-                                      Text(
-                                        "Total: ${item['total'] ?? 0} L",
-                                        style: const TextStyle(
-                                          fontSize: 15,
-                                          color: Colors.green,
-                                          fontWeight: FontWeight.w600,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                  trailing: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      item['is_synced'] == true
-                                          ? const Icon(
-                                              Icons.check_circle,
-                                              color: Colors.green,
-                                            )
-                                          : IconButton(
-                                              icon: const Icon(
-                                                Icons.sync,
-                                                color: Colors.orange,
-                                              ),
-                                              onPressed: () async {
-                                                final hiveKey = item['hiveKey'];
-                                                if (hiveKey != null) {
-                                                  bool success =
-                                                      await syncSingleCollection(
-                                                        hiveKey,
-                                                      );
-                                                  if (success) {
-                                                    setState(
-                                                      () => item['is_synced'] =
-                                                          true,
-                                                    );
-                                                    Fluttertoast.showToast(
-                                                      msg:
-                                                          "Synced successfully",
-                                                      backgroundColor:
-                                                          Colors.green,
-                                                    );
-                                                  } else {
-                                                    Fluttertoast.showToast(
-                                                      msg: "Sync failed",
-                                                      backgroundColor:
-                                                          Colors.red,
-                                                    );
-                                                  }
-                                                }
-                                              },
-                                            ),
-                                      _buildPrintButton(item),
-                                    ],
-                                  ),
-                                ),
-                              );
-                            },
+                  ],
+                ),
+              ],
+            ),
+          ),
+
+          // Collections List
+          Expanded(
+            child: isLoading
+                ? const Center(child: CircularProgressIndicator())
+                : filteredCollections.isEmpty
+                ? Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          Icons.inbox,
+                          size: 64,
+                          color: Colors.grey.shade400,
+                        ),
+                        const SizedBox(height: 16),
+                        Text(
+                          'No collections found',
+                          style: TextStyle(
+                            fontSize: 16,
+                            color: Colors.grey.shade600,
                           ),
+                        ),
+                        const SizedBox(height: 8),
+                        TextButton.icon(
+                          onPressed: _syncFromServer,
+                          icon: const Icon(Icons.sync),
+                          label: const Text('Sync from server'),
+                        ),
+                      ],
+                    ),
+                  )
+                : RefreshIndicator(
+                    onRefresh: _syncFromServer,
+                    child: ListView.builder(
+                      padding: const EdgeInsets.all(16),
+                      itemCount: filteredCollections.length,
+                      itemBuilder: (context, index) {
+                        final item = filteredCollections[index];
+                        return _buildCollectionCard(item);
+                      },
+                    ),
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCollectionCard(Map<String, dynamic> item) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      elevation: 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Header: Farmer Info and Date
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '${item['farmerID']} - ${item['fname']} ${item['lname']}',
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Row(
+                        children: [
+                          Icon(
+                            Icons.business,
+                            size: 14,
+                            color: Colors.grey.shade600,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            item['center_name'],
+                            style: TextStyle(
+                              fontSize: 13,
+                              color: Colors.grey.shade600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text(
+                      DateFormat(
+                        'MMM dd, yyyy',
+                      ).format(DateTime.parse(item['collection_date'])),
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                        color: Colors.grey.shade700,
+                      ),
+                    ),
+                    if (!item['is_synced'])
+                      Container(
+                        margin: const EdgeInsets.only(top: 4),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 2,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.orange.shade100,
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Text(
+                          'Pending',
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: Colors.orange.shade700,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ],
+            ),
+            const Divider(height: 24),
+
+            // Milk Details
+            Row(
+              children: [
+                Expanded(
+                  child: _buildMilkDetail(
+                    'Morning',
+                    item['morning'],
+                    Icons.wb_sunny_outlined,
+                    Colors.orange,
+                  ),
+                ),
+                Expanded(
+                  child: _buildMilkDetail(
+                    'Evening',
+                    item['evening'],
+                    Icons.nightlight_outlined,
+                    Colors.indigo,
+                  ),
+                ),
+                Expanded(
+                  child: _buildMilkDetail(
+                    'Rejected',
+                    item['rejected'],
+                    Icons.remove_circle_outline,
+                    Colors.red,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+
+            // Total and Print Button
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.green.shade50,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Row(
+                    children: [
+                      Icon(
+                        Icons.water_drop,
+                        color: Colors.green.shade700,
+                        size: 20,
+                      ),
+                      const SizedBox(width: 8),
+                      const Text(
+                        'Total: ',
+                        style: TextStyle(
+                          fontWeight: FontWeight.w600,
+                          fontSize: 15,
+                        ),
+                      ),
+                      Text(
+                        '${item['total'].toStringAsFixed(2)} L',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 18,
+                          color: Colors.green.shade700,
+                        ),
+                      ),
+                    ],
+                  ),
+                  IconButton(
+                    onPressed: () => _printReceipt(item),
+                    icon: Icon(Icons.print, color: Colors.green.shade700),
+                    tooltip: 'Print Receipt',
+                    style: IconButton.styleFrom(
+                      backgroundColor: Colors.white,
+                      padding: const EdgeInsets.all(8),
+                    ),
                   ),
                 ],
               ),
+            ),
+          ],
+        ),
       ),
+    );
+  }
+
+  Widget _buildMilkDetail(
+    String label,
+    dynamic value,
+    IconData icon,
+    Color color,
+  ) {
+    return Column(
+      children: [
+        Icon(icon, size: 20, color: color),
+        const SizedBox(height: 4),
+        Text(
+          label,
+          style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          '${value.toStringAsFixed(1)}L',
+          style: TextStyle(
+            fontSize: 15,
+            fontWeight: FontWeight.bold,
+            color: color,
+          ),
+        ),
+      ],
     );
   }
 }
