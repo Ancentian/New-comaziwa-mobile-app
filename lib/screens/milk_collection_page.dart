@@ -461,10 +461,69 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
     try {
       print('🖨️ Starting background print...');
 
-      // Use cached totals if available (from API response)
-      // This is much faster than scanning all Hive records
+      // Small delay to ensure Hive has fully persisted the data
+      await Future.delayed(const Duration(milliseconds: 100));
+
+      // Calculate current total for this collection
       final currentTotal =
           collection.morning + collection.evening - collection.rejected;
+
+      // Calculate totals from Hive data (including the just-saved collection)
+      final box = Hive.box<MilkCollection>('milk_collections');
+      final allCollections = box.values.toList();
+
+      final collectionDate = DateTime.parse(collection.date);
+
+      // Today's total (for the collection date)
+      final todayTotal = allCollections
+          .where((c) {
+            try {
+              final cDate = DateTime.parse(c.date);
+              return c.farmerId == collection.farmerId &&
+                  cDate.year == collectionDate.year &&
+                  cDate.month == collectionDate.month &&
+                  cDate.day == collectionDate.day;
+            } catch (e) {
+              return false;
+            }
+          })
+          .fold<double>(
+            0,
+            (sum, c) => sum + c.morning + c.evening - c.rejected,
+          );
+
+      // Monthly total (for the collection's month and year)
+      final monthTotal = allCollections
+          .where((c) {
+            try {
+              final cDate = DateTime.parse(c.date);
+              return c.farmerId == collection.farmerId &&
+                  cDate.year == collectionDate.year &&
+                  cDate.month == collectionDate.month;
+            } catch (e) {
+              return false;
+            }
+          })
+          .fold<double>(
+            0,
+            (sum, c) => sum + c.morning + c.evening - c.rejected,
+          );
+
+      // Yearly total (for the collection's year)
+      final yearTotal = allCollections
+          .where((c) {
+            try {
+              final cDate = DateTime.parse(c.date);
+              return c.farmerId == collection.farmerId &&
+                  cDate.year == collectionDate.year;
+            } catch (e) {
+              return false;
+            }
+          })
+          .fold<double>(
+            0,
+            (sum, c) => sum + c.morning + c.evening - c.rejected,
+          );
 
       // Get company name (cached)
       final prefs = await SharedPreferences.getInstance();
@@ -472,7 +531,9 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
       final servedBy = prefs.getString('name');
 
       print('🖨️ Building receipt data...');
-      // Build receipt data using already-available data
+      print('📊 Today: $todayTotal, Month: $monthTotal, Year: $yearTotal');
+
+      // Build receipt data using calculated totals from Hive
       final receiptData = {
         'farmerID': collection.farmerId.toString(),
         'fname': collection.fname,
@@ -483,10 +544,10 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
         'evening': collection.evening.toString(),
         'rejected': collection.rejected.toString(),
         'total': currentTotal.toStringAsFixed(2),
-        // Use pre-calculated totals from farmer search (much faster)
-        'today_total': todaysTotal.toStringAsFixed(2),
-        'monthly_total': monthlyTotal.toStringAsFixed(2),
-        'yearly_total': yearlyTotal.toStringAsFixed(2),
+        // Use calculated totals from Hive (includes just-saved collection)
+        'today_total': todayTotal.toStringAsFixed(2),
+        'monthly_total': monthTotal.toStringAsFixed(2),
+        'yearly_total': yearTotal.toStringAsFixed(2),
         'company_name': companyName,
         'served_by': servedBy,
       };

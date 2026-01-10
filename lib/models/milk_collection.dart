@@ -79,7 +79,7 @@ class MilkCollection extends HiveObject {
   /// Create MilkCollection from API response
   factory MilkCollection.fromJson(Map<String, dynamic> json) {
     return MilkCollection(
-      farmerId: json['farmer_id'] ?? 0,
+      farmerId: json['farmer_db_id'] ?? json['farmer_id'] ?? 0,
       date: json['collection_date'] ?? '',
       morning: (json['morning'] ?? 0).toDouble(),
       evening: (json['evening'] ?? 0).toDouble(),
@@ -91,6 +91,7 @@ class MilkCollection extends HiveObject {
       serverId: json['id'],
       createdById: json['created_by_id'],
       createdByType: json['created_by_type'],
+      memberNo: json['farmerID'], // Parse the member code from API
     );
   }
 }

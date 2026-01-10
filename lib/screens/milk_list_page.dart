@@ -58,7 +58,7 @@ class _MilkListPageState extends State<MilkListPage> {
           'morning': e.morning,
           'evening': e.evening,
           'rejected': e.rejected,
-          'total': e.morning + e.evening - e.rejected,
+          'total': e.morning + e.evening,
           'is_synced': e.isSynced,
         };
       }).toList();
@@ -200,6 +200,55 @@ class _MilkListPageState extends State<MilkListPage> {
       final prefs = await SharedPreferences.getInstance();
       final companyName = prefs.getString('company_name') ?? 'Comaziwa';
 
+      // Calculate farmer's totals from local data
+      final farmerId = collection['farmer_id'];
+      final collectionDate = DateTime.parse(collection['collection_date']);
+
+      print('🖨️ Printing receipt for farmer_id: $farmerId');
+      print('📅 Collection date: $collectionDate');
+      print('📦 Total collections available: ${collections.length}');
+
+      // Today's total (for the collection date, not current date)
+      final todaysTotal = collections
+          .where(
+            (c) =>
+                c['farmer_id'] == farmerId &&
+                DateTime.parse(c['collection_date']).year ==
+                    collectionDate.year &&
+                DateTime.parse(c['collection_date']).month ==
+                    collectionDate.month &&
+                DateTime.parse(c['collection_date']).day == collectionDate.day,
+          )
+          .fold<double>(0, (sum, c) => sum + (c['total'] as num).toDouble());
+
+      print('📊 Today\'s total: $todaysTotal');
+
+      // Monthly total (for the collection's month and year)
+      final monthlyTotal = collections
+          .where(
+            (c) =>
+                c['farmer_id'] == farmerId &&
+                DateTime.parse(c['collection_date']).year ==
+                    collectionDate.year &&
+                DateTime.parse(c['collection_date']).month ==
+                    collectionDate.month,
+          )
+          .fold<double>(0, (sum, c) => sum + (c['total'] as num).toDouble());
+
+      print('📊 Monthly total: $monthlyTotal');
+
+      // Yearly total (for the collection's year)
+      final yearlyTotal = collections
+          .where(
+            (c) =>
+                c['farmer_id'] == farmerId &&
+                DateTime.parse(c['collection_date']).year ==
+                    collectionDate.year,
+          )
+          .fold<double>(0, (sum, c) => sum + (c['total'] as num).toDouble());
+
+      print('📊 Yearly total: $yearlyTotal');
+
       final receiptData = {
         'farmerID': collection['farmerID'],
         'fname': collection['fname'],
@@ -211,6 +260,9 @@ class _MilkListPageState extends State<MilkListPage> {
         'rejected': collection['rejected'].toString(),
         'total': collection['total'].toStringAsFixed(2),
         'company_name': companyName,
+        'todays_total': todaysTotal.toStringAsFixed(2),
+        'monthly_total': monthlyTotal.toStringAsFixed(2),
+        'yearly_total': yearlyTotal.toStringAsFixed(2),
       };
 
       final result = await PrinterService.printDirectlyFast(
