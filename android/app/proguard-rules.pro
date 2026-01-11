@@ -23,3 +23,12 @@
 
 ## Connectivity Plus
 -keep class com.android.connectivity.** { *; }
+## Bluetooth Printer
+-keep class com.tablemi.flutter_bluetooth_printer.** { *; }
+-keep class android.bluetooth.** { *; }
+-keepclassmembers class * {
+    @android.webkit.JavascriptInterface <methods>;
+}
+
+## Permission Handler
+-keep class com.baseflow.permissionhandler.** { *; }
