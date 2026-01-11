@@ -12,6 +12,7 @@ import '../models/milk_collection.dart';
 import '../services/sync_service.dart';
 import '../services/printer_service.dart';
 import '../services/auto_print_service.dart';
+import '../utils/error_helper.dart';
 
 class MilkCollectionPage extends StatefulWidget {
   const MilkCollectionPage({super.key});
@@ -23,15 +24,9 @@ class MilkCollectionPage extends StatefulWidget {
 class _MilkCollectionPageState extends State<MilkCollectionPage>
     with SingleTickerProviderStateMixin {
   final TextEditingController _memberNoController = TextEditingController();
-  final TextEditingController _morningController = TextEditingController(
-    text: "0",
-  );
-  final TextEditingController _eveningController = TextEditingController(
-    text: "0",
-  );
-  final TextEditingController _rejectedController = TextEditingController(
-    text: "0",
-  );
+  final TextEditingController _morningController = TextEditingController();
+  final TextEditingController _eveningController = TextEditingController();
+  final TextEditingController _rejectedController = TextEditingController();
 
   // error flags for validation
   bool _morningError = false;
@@ -89,9 +84,8 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
   void _calculateTotal() {
     final morning = double.tryParse(_morningController.text) ?? 0;
     final evening = double.tryParse(_eveningController.text) ?? 0;
-    final rejected = double.tryParse(_rejectedController.text) ?? 0;
     setState(() {
-      total = morning + evening - rejected;
+      total = morning + evening;
     });
   }
 
@@ -351,9 +345,14 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
             textColor: Colors.white,
           );
         }
-      } catch (_) {
+      } catch (e) {
+        final userMessage = ErrorHelper.getUserFriendlyMessage(e);
+        final logMessage = ErrorHelper.getLogMessage(e);
+
+        print('⚠️ Farmer search error: $logMessage');
+
         Fluttertoast.showToast(
-          msg: "No internet — offline search only",
+          msg: userMessage,
           backgroundColor: Colors.orange,
           textColor: Colors.white,
         );
@@ -465,65 +464,43 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
       await Future.delayed(const Duration(milliseconds: 100));
 
       // Calculate current total for this collection
-      final currentTotal =
-          collection.morning + collection.evening - collection.rejected;
+      final currentTotal = collection.morning + collection.evening;
 
-      // Calculate totals from Hive data (including the just-saved collection)
+      // Get farmer from Hive to use server totals
+      final farmersBox = Hive.box<Farmer>('farmers');
+      final farmer = farmersBox.get(collection.farmerId);
+
+      // Use server totals directly (from last sync)
+      double monthTotal = farmer?.monthlyTotal ?? 0;
+      double yearTotal = farmer?.yearlyTotal ?? 0;
+
+      // Calculate today's total from local Hive
       final box = Hive.box<MilkCollection>('milk_collections');
       final allCollections = box.values.toList();
 
-      final collectionDate = DateTime.parse(collection.date);
+      final now = DateTime.now();
 
-      // Today's total (for the collection date)
+      // Use member number for comparison (more reliable than farmerId which can be DB ID or member number)
+      final memberNo = collection.memberNo ?? collection.farmerId.toString();
+
+      // Today's total (for TODAY only) - match by member number
       final todayTotal = allCollections
           .where((c) {
             try {
               final cDate = DateTime.parse(c.date);
-              return c.farmerId == collection.farmerId &&
-                  cDate.year == collectionDate.year &&
-                  cDate.month == collectionDate.month &&
-                  cDate.day == collectionDate.day;
+              final cMemberNo = c.memberNo ?? c.farmerId.toString();
+              return cMemberNo == memberNo &&
+                  cDate.year == now.year &&
+                  cDate.month == now.month &&
+                  cDate.day == now.day;
             } catch (e) {
               return false;
             }
           })
-          .fold<double>(
-            0,
-            (sum, c) => sum + c.morning + c.evening - c.rejected,
-          );
+          .fold<double>(0, (sum, c) => sum + c.morning + c.evening);
 
-      // Monthly total (for the collection's month and year)
-      final monthTotal = allCollections
-          .where((c) {
-            try {
-              final cDate = DateTime.parse(c.date);
-              return c.farmerId == collection.farmerId &&
-                  cDate.year == collectionDate.year &&
-                  cDate.month == collectionDate.month;
-            } catch (e) {
-              return false;
-            }
-          })
-          .fold<double>(
-            0,
-            (sum, c) => sum + c.morning + c.evening - c.rejected,
-          );
-
-      // Yearly total (for the collection's year)
-      final yearTotal = allCollections
-          .where((c) {
-            try {
-              final cDate = DateTime.parse(c.date);
-              return c.farmerId == collection.farmerId &&
-                  cDate.year == collectionDate.year;
-            } catch (e) {
-              return false;
-            }
-          })
-          .fold<double>(
-            0,
-            (sum, c) => sum + c.morning + c.evening - c.rejected,
-          );
+      print('📊 Server totals - Monthly: $monthTotal, Yearly: $yearTotal');
+      print('📊 Today: $todayTotal, Month: $monthTotal, Year: $yearTotal');
 
       // Get company name (cached)
       final prefs = await SharedPreferences.getInstance();
@@ -573,9 +550,9 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
   }
 
   void _resetForm() {
-    _morningController.text = '0';
-    _eveningController.text = '0';
-    _rejectedController.text = '0';
+    _morningController.clear();
+    _eveningController.clear();
+    _rejectedController.clear();
     setState(() {
       total = 0;
       farmer = null;
@@ -723,6 +700,7 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
                             'Morning',
                             icon: Icons.wb_sunny_outlined,
                             error: _morningError,
+                            hint: '0',
                           ),
                         ),
                         const SizedBox(width: 12),
@@ -732,6 +710,7 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
                             'Evening',
                             icon: Icons.nightlight_outlined,
                             error: _eveningError,
+                            hint: '0',
                           ),
                         ),
                       ],
@@ -741,6 +720,7 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
                       _rejectedController,
                       'Rejected (Optional)',
                       icon: Icons.remove_circle_outline,
+                      hint: '0',
                     ),
                     const SizedBox(height: 16),
                     // Total Display
@@ -1084,12 +1064,15 @@ class _MilkCollectionPageState extends State<MilkCollectionPage>
     String label, {
     bool error = false,
     IconData? icon,
+    String? hint,
   }) {
     return TextField(
       controller: controller,
       style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
       decoration: InputDecoration(
         labelText: label,
+        hintText: hint,
+        hintStyle: TextStyle(color: Colors.grey.shade400),
         prefixIcon: icon != null
             ? Icon(
                 icon,

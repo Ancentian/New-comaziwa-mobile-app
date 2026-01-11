@@ -166,11 +166,23 @@ class FarmerService {
         print('RAW BODY: ${response.body}');
         return null;
       }
+
+      // Extract farmer data and totals from API response
       final farmerData = Map<String, dynamic>.from(data['farmer']);
+
+      // Add server totals to farmer data (these are the base totals from server)
+      farmerData['monthly_total'] = data['monthly_total'] ?? 0;
+      farmerData['yearly_total'] = data['yearly_total'] ?? 0;
+
+      print(
+        '📊 Server totals - Monthly: ${farmerData['monthly_total']}, Yearly: ${farmerData['yearly_total']}',
+      );
 
       final farmer = Farmer.fromJson(farmerData);
 
+      // Save to Hive with server totals
       Hive.box<Farmer>('farmers').put(farmer.farmerId, farmer);
+      print('✅ Saved farmer ${farmer.farmerId} to Hive with server totals');
 
       return farmer;
     } catch (e) {
