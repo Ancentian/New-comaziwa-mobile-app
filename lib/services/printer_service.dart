@@ -554,7 +554,7 @@ class PrinterService {
 
     out.addAll(
       _bytesFromString(
-        'Today\'s Total:      ${_padRight(data['today_total']?.toString() ?? data['total']?.toString() ?? '0', 7)} L\n',
+        'Today\'s Total:      ${_padRight(data['todays_total']?.toString() ?? data['today_total']?.toString() ?? data['total']?.toString() ?? '0', 7)} L\n',
       ),
     );
     out.addAll(

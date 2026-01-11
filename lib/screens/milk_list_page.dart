@@ -6,8 +6,10 @@ import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../config/app_config.dart';
+import '../models/farmer.dart';
 import '../models/milk_collection.dart';
 import '../services/printer_service.dart';
+import '../utils/error_helper.dart';
 
 class MilkListPage extends StatefulWidget {
   const MilkListPage({super.key});
@@ -42,10 +44,29 @@ class _MilkListPageState extends State<MilkListPage> {
     setState(() => isLoading = true);
 
     try {
+      final prefs = await SharedPreferences.getInstance();
+      final userType = prefs.getString('type');
+      final userId = prefs.getInt('user_id');
+
       final box = Hive.box<MilkCollection>('milk_collections');
 
+      // Filter collections based on user type
+      Iterable<MilkCollection> filteredBox;
+
+      if (userType == 'grader' || userType == 'employee') {
+        // Graders only see collections they created
+        filteredBox = box.values.where((e) => e.createdById == userId);
+        print(
+          '🔒 Grader filter: Showing only collections created by user $userId',
+        );
+      } else {
+        // Admins see everything
+        filteredBox = box.values;
+        print('👑 Admin view: Showing all collections');
+      }
+
       // Map Hive collections to display format
-      final records = box.values.map((e) {
+      final records = filteredBox.map((e) {
         return {
           'id': e.serverId ?? 0,
           'farmer_id': e.farmerId, // Numeric DB ID
@@ -58,7 +79,7 @@ class _MilkListPageState extends State<MilkListPage> {
           'morning': e.morning,
           'evening': e.evening,
           'rejected': e.rejected,
-          'total': e.morning + e.evening - e.rejected,
+          'total': e.morning + e.evening,
           'is_synced': e.isSynced,
         };
       }).toList();
@@ -95,12 +116,19 @@ class _MilkListPageState extends State<MilkListPage> {
 
       setState(() => isLoading = true);
 
-      final response = await http.get(
-        Uri.parse(
-          '${AppConfig.baseUrl}/api/milk-collections-sync?tenant_id=$tenantId&limit=1000',
-        ),
-        headers: {'Authorization': 'Bearer $token'},
-      );
+      final response = await http
+          .get(
+            Uri.parse(
+              '${AppConfig.baseUrl}/api/milk-collections-sync?tenant_id=$tenantId&limit=1000',
+            ),
+            headers: {'Authorization': 'Bearer $token'},
+          )
+          .timeout(
+            const Duration(seconds: 10),
+            onTimeout: () {
+              throw Exception('Connection timeout');
+            },
+          );
 
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
@@ -108,24 +136,52 @@ class _MilkListPageState extends State<MilkListPage> {
             .map((item) => MilkCollection.fromJson(item))
             .toList();
 
+        // Get user info for filtering
+        final userType = prefs.getString('type');
+        final userId = prefs.getInt('user_id');
+
         // Save to Hive
         final box = Hive.box<MilkCollection>('milk_collections');
         await box.clear(); // Clear old data
-        for (var collection in syncedCollections) {
+
+        // Filter before saving if grader
+        List<MilkCollection> collectionsToSave;
+        if (userType == 'grader' || userType == 'employee') {
+          collectionsToSave = syncedCollections
+              .where((c) => c.createdById == userId)
+              .toList();
+          print(
+            '🔒 Grader sync: Saving only ${collectionsToSave.length} collections created by user $userId',
+          );
+        } else {
+          collectionsToSave = syncedCollections;
+          print(
+            '👑 Admin sync: Saving all ${collectionsToSave.length} collections',
+          );
+        }
+
+        for (var collection in collectionsToSave) {
           await box.add(collection);
         }
 
         _showMessage(
-          'Synced ${syncedCollections.length} collections',
+          'Synced ${collectionsToSave.length} collections',
           Colors.green,
         );
         await _loadCollections();
       } else {
-        _showMessage('Sync failed', Colors.red);
+        _showMessage(
+          'Sync failed: Server returned ${response.statusCode}',
+          Colors.red,
+        );
       }
     } catch (e) {
-      print('Sync error: $e');
-      _showMessage('Sync error: Check connection', Colors.orange);
+      // Provide user-friendly offline messages
+      final userMessage = ErrorHelper.getUserFriendlyMessage(e);
+      final logMessage = ErrorHelper.getLogMessage(e);
+
+      print('📡 Sync error: $logMessage');
+      _showMessage(userMessage, Colors.orange);
     } finally {
       setState(() => isLoading = false);
     }
@@ -200,6 +256,56 @@ class _MilkListPageState extends State<MilkListPage> {
       final prefs = await SharedPreferences.getInstance();
       final companyName = prefs.getString('company_name') ?? 'Comaziwa';
 
+      // Calculate farmer's totals using server base + local additions
+      final farmerId = collection['farmer_id'];
+      final farmerMemberNo = collection['farmerID']; // Member number like "33"
+      final collectionDate = DateTime.parse(collection['collection_date']);
+      final now = DateTime.now();
+
+      print(
+        '🖨️ Printing receipt for farmer_id: $farmerId, memberNo: $farmerMemberNo',
+      );
+      print('📅 Collection date: $collectionDate');
+      print('📦 Total collections available: ${collections.length}');
+
+      // Get farmer from Hive using member number (Hive key is farmerID, not database ID)
+      final farmersBox = Hive.box<Farmer>('farmers');
+      int farmerKey = 0;
+      try {
+        // farmerID from collection is a string like "33", convert to int
+        farmerKey = int.parse(farmerMemberNo.toString());
+      } catch (e) {
+        print('❌ Error parsing farmerID: $e');
+      }
+
+      final farmer = farmersBox.get(farmerKey);
+
+      if (farmer == null) {
+        print('❌ Farmer not found in Hive with key: $farmerKey');
+      } else {
+        print('✅ Found farmer: ${farmer.fname} ${farmer.lname}');
+      }
+
+      // Use server totals directly (from last sync)
+      double monthlyTotal = farmer?.monthlyTotal ?? 0;
+      double yearlyTotal = farmer?.yearlyTotal ?? 0;
+
+      print('📊 Server totals - Monthly: $monthlyTotal, Yearly: $yearlyTotal');
+
+      // Today's total (for TODAY only)
+      final todaysTotal = collections
+          .where(
+            (c) =>
+                c['farmer_id'] == farmerId &&
+                DateTime.parse(c['collection_date']).year == now.year &&
+                DateTime.parse(c['collection_date']).month == now.month &&
+                DateTime.parse(c['collection_date']).day == now.day,
+          )
+          .fold<double>(0, (sum, c) => sum + (c['total'] as num).toDouble());
+
+      print('📊 Today\'s total: $todaysTotal');
+      print('📊 Monthly total: $monthlyTotal, Yearly total: $yearlyTotal');
+
       final receiptData = {
         'farmerID': collection['farmerID'],
         'fname': collection['fname'],
@@ -211,6 +317,9 @@ class _MilkListPageState extends State<MilkListPage> {
         'rejected': collection['rejected'].toString(),
         'total': collection['total'].toStringAsFixed(2),
         'company_name': companyName,
+        'todays_total': todaysTotal.toStringAsFixed(2),
+        'monthly_total': monthlyTotal.toStringAsFixed(2),
+        'yearly_total': yearlyTotal.toStringAsFixed(2),
       };
 
       final result = await PrinterService.printDirectlyFast(

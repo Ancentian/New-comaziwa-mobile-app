@@ -225,164 +225,182 @@ class _DailyCollectionSummaryPageState
           ),
         ],
       ),
-      body: Column(
-        children: [
-          // Date Selector Card
-          Card(
-            margin: const EdgeInsets.all(16),
-            elevation: 4,
-            child: InkWell(
-              onTap: _selectDate,
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text(
-                          'Selected Date',
-                          style: TextStyle(fontSize: 14, color: Colors.grey),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          DateFormat(
-                            'EEEE, MMMM dd, yyyy',
-                          ).format(selectedDate),
-                          style: const TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
+      body: RefreshIndicator(
+        onRefresh: _loadDailyCollections,
+        child: Column(
+          children: [
+            // Date Selector Card
+            Card(
+              margin: const EdgeInsets.all(16),
+              elevation: 4,
+              child: InkWell(
+                onTap: _selectDate,
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'Selected Date',
+                            style: TextStyle(fontSize: 14, color: Colors.grey),
                           ),
-                        ),
-                      ],
-                    ),
-                    const Icon(
-                      Icons.calendar_today,
-                      color: Colors.green,
-                      size: 32,
-                    ),
-                  ],
+                          const SizedBox(height: 4),
+                          Text(
+                            DateFormat(
+                              'EEEE, MMMM dd, yyyy',
+                            ).format(selectedDate),
+                            style: const TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const Icon(
+                        Icons.calendar_today,
+                        color: Colors.green,
+                        size: 32,
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
-          ),
 
-          // Summary Statistics Cards
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Row(
-              children: [
-                Expanded(
-                  child: _buildStatCard(
-                    'Farmers',
-                    totalFarmers.toString(),
-                    Icons.people,
-                    Colors.blue,
+            // Summary Statistics Cards
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: _buildStatCard(
+                      'Farmers',
+                      totalFarmers.toString(),
+                      Icons.people,
+                      Colors.blue,
+                    ),
                   ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _buildStatCard(
-                    'Total',
-                    '${grandTotal.toStringAsFixed(1)} L',
-                    Icons.water_drop,
-                    Colors.green,
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: _buildStatCard(
+                      'Total',
+                      '${grandTotal.toStringAsFixed(1)} L',
+                      Icons.water_drop,
+                      Colors.green,
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
 
-          const SizedBox(height: 12),
+            const SizedBox(height: 12),
 
-          // Morning, Evening, Rejected breakdown
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Card(
-              elevation: 2,
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  children: [
-                    _buildBreakdownRow('Morning', totalMorning, Colors.orange),
-                    const Divider(),
-                    _buildBreakdownRow('Evening', totalEvening, Colors.indigo),
-                    const Divider(),
-                    _buildBreakdownRow('Rejected', totalRejected, Colors.red),
-                  ],
+            // Morning, Evening, Rejected breakdown
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Card(
+                elevation: 2,
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    children: [
+                      _buildBreakdownRow(
+                        'Morning',
+                        totalMorning,
+                        Colors.orange,
+                      ),
+                      const Divider(),
+                      _buildBreakdownRow(
+                        'Evening',
+                        totalEvening,
+                        Colors.indigo,
+                      ),
+                      const Divider(),
+                      _buildBreakdownRow('Rejected', totalRejected, Colors.red),
+                    ],
+                  ),
                 ),
               ),
             ),
-          ),
 
-          const SizedBox(height: 16),
+            const SizedBox(height: 16),
 
-          // Collections List Header
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                const Text(
-                  'Collections Details',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                ),
-                Text(
-                  '${dailyCollections.length} records',
-                  style: const TextStyle(fontSize: 14, color: Colors.grey),
-                ),
-              ],
-            ),
-          ),
-
-          const SizedBox(height: 8),
-
-          // Collections List
-          Expanded(
-            child: isLoading
-                ? const Center(child: CircularProgressIndicator())
-                : dailyCollections.isEmpty
-                ? Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(
-                          Icons.inbox_outlined,
-                          size: 80,
-                          color: Colors.grey[400],
-                        ),
-                        const SizedBox(height: 16),
-                        Text(
-                          'No collections for this date',
-                          style: TextStyle(
-                            fontSize: 16,
-                            color: Colors.grey[600],
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        ElevatedButton.icon(
-                          onPressed: _selectDate,
-                          icon: const Icon(Icons.calendar_today),
-                          label: const Text('Select Different Date'),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.green,
-                          ),
-                        ),
-                      ],
-                    ),
-                  )
-                : ListView.builder(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    itemCount: dailyCollections.length,
-                    itemBuilder: (context, index) {
-                      final collection = dailyCollections[index];
-                      return _buildCollectionCard(collection);
-                    },
+            // Collections List Header
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text(
+                    'Collections Details',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                   ),
-          ),
-        ],
-      ),
+                  Text(
+                    '${dailyCollections.length} records',
+                    style: const TextStyle(fontSize: 14, color: Colors.grey),
+                  ),
+                ],
+              ),
+            ),
+
+            const SizedBox(height: 8),
+
+            // Collections List
+            Expanded(
+              child: isLoading
+                  ? const Center(child: CircularProgressIndicator())
+                  : dailyCollections.isEmpty
+                  ? SingleChildScrollView(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      child: SizedBox(
+                        height: MediaQuery.of(context).size.height * 0.4,
+                        child: Center(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(
+                                Icons.inbox_outlined,
+                                size: 80,
+                                color: Colors.grey[400],
+                              ),
+                              const SizedBox(height: 16),
+                              Text(
+                                'No collections for this date',
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  color: Colors.grey[600],
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              ElevatedButton.icon(
+                                onPressed: _selectDate,
+                                icon: const Icon(Icons.calendar_today),
+                                label: const Text('Select Different Date'),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: Colors.green,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    )
+                  : ListView.builder(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      itemCount: dailyCollections.length,
+                      itemBuilder: (context, index) {
+                        final collection = dailyCollections[index];
+                        return _buildCollectionCard(collection);
+                      },
+                    ),
+            ),
+          ],
+        ),
+      ), // Close RefreshIndicator
     );
   }
 

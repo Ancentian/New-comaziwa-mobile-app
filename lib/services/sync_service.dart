@@ -83,6 +83,8 @@ import 'package:flutter/material.dart';
 import '../config/app_config.dart';
 import '../models/milk_collection.dart';
 import '../utils/http_retry_helper.dart';
+import '../utils/error_helper.dart';
+import 'farmer_service.dart';
 
 class SyncService {
   final String apiBase = "${AppConfig.baseUrl}/api";
@@ -112,26 +114,55 @@ class SyncService {
     _isSyncing = true;
 
     try {
-      // Check if there's unsynced data
+      // Step 1: Upload unsynced collections
       final pendingCount = getPendingCollectionsCount();
 
       if (pendingCount > 0) {
-        print("🔄 Found $pendingCount unsynced collections. Syncing...");
+        print("📤 Found $pendingCount unsynced collections. Uploading...");
 
-        final success = await syncAll();
+        final uploadSuccess = await syncCollections();
 
-        if (success) {
-          Fluttertoast.showToast(
-            msg: "✅ $pendingCount collections synced successfully",
-            backgroundColor: Colors.green,
-            toastLength: Toast.LENGTH_LONG,
-          );
+        if (uploadSuccess) {
+          print("✅ $pendingCount collections uploaded successfully");
         } else {
-          print("⚠️ Some collections could not be synced");
+          print("⚠️ Some collections could not be uploaded");
         }
       }
+
+      // Step 2: Download new collections from server
+      print("📥 Downloading new collections from server...");
+      final downloadSuccess = await downloadMilkCollections();
+
+      if (downloadSuccess) {
+        print("✅ Collections downloaded successfully");
+      } else {
+        print("⚠️ Could not download new collections");
+      }
+
+      // Step 3: Download updated farmer data
+      print("📥 Downloading farmer data from server...");
+      try {
+        final farmerSuccess = await FarmerService().downloadFarmers();
+        if (farmerSuccess) {
+          print("✅ Farmer data downloaded successfully");
+        } else {
+          print("⚠️ Could not download all farmer data");
+        }
+      } catch (e) {
+        print("⚠️ Could not download farmer data: $e");
+      }
+
+      // Show success notification if any sync succeeded
+      if (pendingCount > 0 || downloadSuccess) {
+        Fluttertoast.showToast(
+          msg: "✅ Data synced successfully",
+          backgroundColor: Colors.green,
+          toastLength: Toast.LENGTH_LONG,
+        );
+      }
     } catch (e) {
-      print("❌ Auto-sync error: $e");
+      final logMessage = ErrorHelper.getLogMessage(e);
+      print("❌ Auto-sync error: $logMessage");
     } finally {
       _isSyncing = false;
     }

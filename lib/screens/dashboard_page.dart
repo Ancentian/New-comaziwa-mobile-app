@@ -17,6 +17,7 @@ import '../models/milk_collection.dart';
 import '../services/sync_service.dart';
 import '../services/farmer_service.dart';
 import '../utils/theme_provider.dart';
+import '../utils/error_helper.dart';
 import '../widgets/shimmer_loading.dart';
 import 'login_page.dart';
 import 'profile_page.dart';
@@ -334,10 +335,12 @@ class _DashboardPageState extends State<DashboardPage>
         );
       }
     } catch (e) {
-      Fluttertoast.showToast(
-        msg: "Error: $e",
-        backgroundColor: Colors.redAccent,
-      );
+      final userMessage = ErrorHelper.getUserFriendlyMessage(e);
+      final logMessage = ErrorHelper.getLogMessage(e);
+
+      print('❌ Dashboard error: $logMessage');
+
+      Fluttertoast.showToast(msg: userMessage, backgroundColor: Colors.orange);
     } finally {
       if (mounted) setState(() => isLoading = false);
       isFetchingData = false;
@@ -387,7 +390,8 @@ class _DashboardPageState extends State<DashboardPage>
         return data['employee'];
       }
     } catch (e) {
-      debugPrint("Error fetching profile: $e");
+      final logMessage = ErrorHelper.getLogMessage(e);
+      debugPrint("⚠️ Profile fetch error: $logMessage");
     }
     return null;
   }
