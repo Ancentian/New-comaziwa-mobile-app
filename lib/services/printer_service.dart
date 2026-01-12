@@ -442,27 +442,28 @@ class PrinterService {
       final bytes = buildMilkReceiptEscPos(receiptData);
       print('🖨️ Built ${bytes.length} bytes, sending to printer...');
 
-      // Fire and forget - don't wait for response
-      FlutterBluetoothPrinter.printBytes(
-            address: _printerAddress!,
-            data: bytes,
-            keepConnected: false,
-            maxBufferSize: 1024,
-            delayTime: 80, // Faster chunks for speed
-          )
-          .then((success) {
-            if (success) {
-              print('✅ Fast print sent successfully');
-            } else {
-              print('⚠️ Fast print may have failed');
-            }
-          })
-          .catchError((e) {
-            print('⚠️ Fast print error: $e');
-          });
+      try {
+        // Use await to get immediate result
+        // keepConnected: true improves speed and reliability for rapid printing
+        final success = await FlutterBluetoothPrinter.printBytes(
+          address: _printerAddress!,
+          data: bytes,
+          keepConnected: true, // Keep connection open for next print (faster)
+          maxBufferSize: 1024,
+          delayTime: 50, // Reduced from 80ms for faster transmission
+        );
 
-      // Return immediately without waiting
-      return true;
+        if (success) {
+          print('✅ Fast print sent successfully');
+        } else {
+          print('⚠️ Fast print returned false - printer may not be connected');
+        }
+
+        return success;
+      } catch (e) {
+        print('⚠️ Fast print error during send: $e');
+        return false;
+      }
     } catch (e) {
       print('❌ Fast print error: $e');
       return false;
